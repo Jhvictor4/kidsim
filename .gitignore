@@ -1,0 +1,10 @@
+# Local dev secrets — never commit API keys
+src/server/DevSecrets.luau
+
+# Rojo build artifacts
+*.rbxlx
+*.rbxl
+*.rbxlx.lock
+*.rbxl.lock
+
+.DS_Store
