@@ -14,10 +14,26 @@ return {
 	BASE_URL = "https://api.gmi-serving.com/v1",
 	MODEL = "openai/gpt-oss-120b",
 
-	-- Dialogue budget
-	MAX_TOKENS_DIALOGUE = 140,
-	MAX_TOKENS_EVALUATION = 600,
+	-- LLM budgets
+	MAX_TOKENS_CUSTOMER = 220, -- JSON turn: say + decision + items
+	MAX_TOKENS_EVALUATION = 700,
 
-	-- Per-incident coach hint limit
-	COACH_HINTS_PER_INCIDENT = 1,
+	-- Round
+	ROUND_SECONDS = 180,
+	COUNTDOWN_SECONDS = 3,
+	MAX_LANES = 4,
+
+	-- Customers
+	CUSTOMER_IDLE_SECONDS = 35, -- customer gives up if the shopkeeper says nothing
+	GAP_BETWEEN_CUSTOMERS = 1.5,
+	COACH_HINTS_PER_CUSTOMER = 1,
+
+	-- Score = revenue + STARS_WEIGHT * sum(stars - 3).
+	-- A pushy sale that leaves a 1-star customer costs $4 of score.
+	STARS_WEIGHT = 2,
+	-- Word of mouth: the lane's average stars scale the next customer's wallet.
+	-- 3 stars = x1.0, each star above/below = +/- BUZZ_PER_STAR, clamped.
+	BUZZ_PER_STAR = 0.15,
+	BUZZ_MIN = 0.7,
+	BUZZ_MAX = 1.3,
 }

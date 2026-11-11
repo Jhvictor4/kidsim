@@ -17,36 +17,45 @@ A cafe, a courtroom, a negotiation, accounting — those are **scenario packs**
 plugged into one pack-agnostic engine:
 
 ```
-Client (world, HUD, dialogue, choices)
+Client (lobby, HUD, live leaderboard, chat with the customer, results)
   -> RemoteEvents
-Server (pack loader, world state, event loop, scoring)   <- the product
+Server (round manager, one lane engine per player, sale validation, scoring)   <- the product
   -> HttpService -> any OpenAI-compatible LLM API
-       personas: counterpart, coach, evaluator
+       personas: customer agent, coach, evaluator
 ```
 
-- **`src/server/SimEngine.luau`** — loads a pack, owns authoritative state
-  (generic meters + inventory), runs `Intro → Shift (incidents) → Close → Debrief`,
-  keeps the shift log. Zero cafe concepts in this file.
-- **`src/server/AgentRuntime.luau`** — three personas, prompts supplied by the pack:
-  - *Counterpart*: the in-world person (orders, bargains, complains). Free-chat,
-    stays in character, age-guardrailed.
-  - *Coach*: at most one short hint per incident; nudges, never plays for the child.
-  - *Evaluator*: reads the full shift log + state and returns structured JSON —
-    skills practiced, evidence, real-world transfer, one next drill.
-- **`src/server/Packs/CafeShift.luau`** — tonight's pack. Starting cash/stock, five
-  incidents (a bargainer demanding 50% off, a wrong-order complaint, an
-  overpromise trap, a freebie request...), every prompt and every number.
-  A new pack = a new module; the engine does not change.
-- **`src/server/WorldBuilder.luau`** — the whole map is generated from code, so the
-  repo is the entire game. No binary place file needed.
-- **`src/client/Main.client.luau`** — HUD (meters defined by the pack), dialogue +
-  choice UI, coach bubble, and the full-screen **sim-to-real debrief**: numbers
-  before→after, skills in plain English, "in the real world this is called…",
-  one next drill.
+Every customer is an **agent**. The server rolls a random customer (age, visible
+situation, hidden wallet, hidden taste, price attitude, patience); an LLM plays them.
+The child talks freely; the customer decides — keep talking, buy, or leave — and how
+many stars to give. Score = **revenue + happiness** (`revenue + 2 × Σ(stars − 3)`),
+and happy customers bring fuller wallets to that counter (word of mouth).
+Friends play side by side: one counter lane each, a 3-minute round, a live leaderboard.
 
-Decision outcomes are deterministic (choices carry state deltas, the server is
-authoritative), while the LLM provides the conversation, the hinting, and the
-evaluation — so the loop stays playable even if a model call fails.
+- **`src/server/RoundManager.luau`** — lobby → countdown → timed round → results,
+  lane assignment per player, live leaderboard, parallel debriefs.
+- **`src/server/LaneEngine.luau`** — one player's counter for one round: pulls
+  customers, runs the conversation, and **validates** every proposed sale against
+  the menu price (never overcharged; discounts allowed), stock and the wallet.
+- **`src/server/CustomerGen.luau`** — random customer profiles from the pack's ranges;
+  only name/age/situation ever reach the client.
+- **`src/server/AgentRuntime.luau`** — three personas, prompts supplied by the pack:
+  - *Customer*: answers in JSON (`say`, `decision`, `items`, `pay`, `stars`), stays
+    in character, age-guardrailed, keeps its wallet private.
+  - *Coach*: one short hint per customer; sees only what the child sees.
+  - *Evaluator*: reads every customer record (hidden profile, what the child said,
+    what sold, stars) and returns structured JSON — skills, evidence, real-world
+    transfer, one next drill.
+- **`src/server/Packs/CafeShift.luau`** — the menu, stock, customer ranges and every
+  prompt. A new pack = a new module; the engine does not change.
+- **`src/server/WorldBuilder.luau`** — the whole map (N counter lanes with live score
+  signs) is generated from code, so the repo is the entire game.
+- **`src/client/Main.client.luau`** — lobby card, HUD, leaderboard, conversation log,
+  coach bubble, and the results + **sim-to-real debrief** ("you earned $14 of the $59
+  in their wallets", per-customer outcomes, skills, real-world transfer, next drill).
+
+The LLM proposes, the server decides: money, stock and score only change through
+server-side validation, and if a model call fails the customer just runs out of
+patience — the round always finishes.
 
 ## Run it in Studio
 
@@ -76,11 +85,12 @@ override `BASE_URL` / `MODEL` in `DevSecrets.luau` to use any other provider.
 ## The 90-second demo
 
 1. Thesis on screen: *Isaac Sim, but for kids.*
-2. A cafe shift starts. An agent customer bargains for 50% off.
-3. The player decides; cash and reputation move live on the HUD.
-4. A complaint hits; the coach whispers one hint if asked.
-5. Shift ends → debrief: the real numbers from this shift, the skills by name
-   (cash flow, customer service, saying no kindly), one next drill.
+2. Two friends, two counters, one 3-minute round. The leaderboard is live.
+3. A random customer walks up ("cold from the rain"); the kid asks, suggests
+   hot chocolate, upsells a cookie, hears "I only have $4", offers a fair deal.
+4. Stuck? The coach whispers one hint.
+5. Time's up → results: rank, "you earned $X of the $Y in their wallets",
+   each customer's stars, the skills by name, one next drill.
 
 ## Safety
 

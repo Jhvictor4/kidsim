@@ -51,7 +51,7 @@ Press **Play** in Studio. In the Output window you should see:
 [KidSim] LLM configured: true
 ```
 
-Click **Start my shift**, type anything to the first customer, and a model-written
+Click **Start the round**, type anything to the first customer, and a model-written
 reply should appear within a couple of seconds. If the model is unreachable you
 get scripted fallback lines and a warning in Output — the shift still completes.
 
@@ -61,5 +61,6 @@ Key-safety check: the key exists only in the Creator Hub secret store and/or
 
 ## 6. Record the demo
 
-90 seconds, English: thesis card → discount incident → complaint + coach hint →
-debrief screen. The debrief shows the real numbers from the shift just played.
+90 seconds, English: thesis card → round start with a friend → persuading a random customer (coach hint once) → results + debrief.
+The debrief shows the real numbers from the round just played. For a two-player
+recording use Studio's Test → Clients and Servers (2 players) or two devices.

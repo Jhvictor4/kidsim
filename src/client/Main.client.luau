@@ -1,8 +1,13 @@
 --!strict
--- All player-facing UI, built from code: HUD meters, dialogue + choices,
--- free-text chat to the counterpart, one-per-incident coach hint, and the
--- full-screen sim-to-real debrief. Pack-agnostic: meter/inventory defs
--- arrive in the Intro phase payload.
+-- All player-facing UI, built from code: lobby card, round timer + HUD,
+-- live leaderboard, the customer conversation (free chat only — the
+-- customer agent decides), one coach hint per customer, and the end-of-
+-- round results + sim-to-real debrief. Pack-agnostic: the menu and copy
+-- arrive in the lobby payload.
+--
+-- Every UIListLayout sorts by LayoutOrder (the engine default is Name,
+-- which silently reorders siblings that share a class name). Key widgets
+-- carry stable Names so tests can target them by path.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -17,10 +22,13 @@ local playerGui = player:WaitForChild("PlayerGui")
 local INK = Color3.fromRGB(34, 32, 29)
 local PAPER = Color3.fromRGB(248, 243, 234)
 local PAPER_DIM = Color3.fromRGB(236, 229, 216)
+local MUTED = Color3.fromRGB(130, 122, 110)
+local SOFT = Color3.fromRGB(100, 92, 80)
 local ACCENT = Color3.fromRGB(214, 124, 48)
 local GOOD = Color3.fromRGB(62, 142, 94)
 local BAD = Color3.fromRGB(186, 70, 60)
 local COACH = Color3.fromRGB(78, 112, 180)
+local GOLD = Color3.fromRGB(226, 172, 52)
 
 -- ---------- tiny UI helpers ----------
 
@@ -39,7 +47,16 @@ local function pad(instance: GuiObject, all: number)
 	padding.Parent = instance
 end
 
-local function label(parent: Instance, text: string, size: number, color: Color3?, bold: boolean?): TextLabel
+local function list(parent: Instance, horizontal: boolean, gap: number): UIListLayout
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = if horizontal then Enum.FillDirection.Horizontal else Enum.FillDirection.Vertical
+	layout.Padding = UDim.new(0, gap)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = parent
+	return layout
+end
+
+local function label(parent: Instance, text: string, size: number, color: Color3?, bold: boolean?, order: number?): TextLabel
 	local l = Instance.new("TextLabel")
 	l.BackgroundTransparency = 1
 	l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
@@ -48,21 +65,61 @@ local function label(parent: Instance, text: string, size: number, color: Color3
 	l.Text = text
 	l.TextWrapped = true
 	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.LayoutOrder = order or 0
 	l.Parent = parent
 	return l
 end
 
-local function button(parent: Instance, text: string, bg: Color3, fg: Color3): TextButton
+-- full-width, auto-height paragraph
+local function para(parent: Instance, text: string, size: number, color: Color3?, bold: boolean?, order: number?): TextLabel
+	local l = label(parent, text, size, color, bold, order)
+	l.Size = UDim2.new(1, 0, 0, 0)
+	l.AutomaticSize = Enum.AutomaticSize.Y
+	return l
+end
+
+local function button(parent: Instance, name: string, text: string, bg: Color3, fg: Color3, order: number?): TextButton
 	local b = Instance.new("TextButton")
+	b.Name = name
 	b.Font = Enum.Font.GothamBold
 	b.TextSize = 16
 	b.TextColor3 = fg
 	b.BackgroundColor3 = bg
 	b.AutoButtonColor = true
 	b.Text = text
+	b.LayoutOrder = order or 0
 	b.Parent = parent
 	round(b, 10)
 	return b
+end
+
+local function panel(parent: Instance, name: string, color: Color3?): Frame
+	local f = Instance.new("Frame")
+	f.Name = name
+	f.BackgroundColor3 = color or PAPER
+	f.BackgroundTransparency = 0.04
+	f.Parent = parent
+	round(f, 14)
+	return f
+end
+
+local function money(n: number): string
+	return "$" .. tostring(math.floor(n + 0.5))
+end
+
+local function stars(avg: number): string
+	if avg <= 0 then
+		return "–"
+	end
+	return string.format("%.1f★", avg)
+end
+
+local function clear(container: Instance)
+	for _, child in container:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
 end
 
 -- ---------- root ----------
@@ -73,124 +130,94 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = playerGui
 
--- ---------- HUD (top) ----------
+local menuLabels: { [string]: string } = {}
 
-local hud = Instance.new("Frame")
-hud.Name = "HUD"
+-- ---------- HUD (top centre) ----------
+
+local hud = panel(gui, "HUD")
 hud.AnchorPoint = Vector2.new(0.5, 0)
 hud.Position = UDim2.new(0.5, 0, 0, 12)
-hud.Size = UDim2.new(0, 0, 0, 44)
+hud.Size = UDim2.new(0, 0, 0, 48)
 hud.AutomaticSize = Enum.AutomaticSize.X
-hud.BackgroundColor3 = PAPER
-hud.BackgroundTransparency = 0.05
 hud.Visible = false
-hud.Parent = gui
-round(hud, 12)
 pad(hud, 8)
-local hudLayout = Instance.new("UIListLayout")
-hudLayout.FillDirection = Enum.FillDirection.Horizontal
-hudLayout.Padding = UDim.new(0, 14)
-hudLayout.VerticalAlignment = Enum.VerticalAlignment.Center
--- Every UIListLayout here sorts by LayoutOrder: the engine default is Name, and
--- since most children share a class name that silently reorders the UI
--- (e.g. a TextButton sorts above TextLabels).
-hudLayout.SortOrder = Enum.SortOrder.LayoutOrder
-hudLayout.Parent = hud
+list(hud, true, 16).VerticalAlignment = Enum.VerticalAlignment.Center
 
-type MeterDef = { key: string, label: string, format: string, max: number? }
-local meterDefs: { MeterDef } = {}
-local inventoryLabels: { [string]: string } = {}
-local meterValueLabels: { [string]: TextLabel } = {}
-local inventoryLabel: TextLabel? = nil
-
-local function formatMeter(def: MeterDef, value: number): string
-	if def.format == "currency" then
-		return "$" .. tostring(value)
-	elseif def.format == "score" then
-		return tostring(value) .. (def.max and ("/" .. tostring(def.max)) or "")
-	end
-	return tostring(value)
+local function chip(title: string, order: number): TextLabel
+	local c = Instance.new("Frame")
+	c.Name = title
+	c.BackgroundTransparency = 1
+	c.AutomaticSize = Enum.AutomaticSize.XY
+	c.LayoutOrder = order
+	c.Parent = hud
+	list(c, false, 0)
+	label(c, string.upper(title), 11, MUTED, true, 1).AutomaticSize = Enum.AutomaticSize.XY
+	local value = label(c, "–", 20, INK, true, 2)
+	value.AutomaticSize = Enum.AutomaticSize.XY
+	return value
 end
 
-local function buildHud()
-	for _, child in hud:GetChildren() do
-		if child:IsA("Frame") then
-			child:Destroy()
-		end
-	end
-	meterValueLabels = {}
-	for index, def in meterDefs do
-		local chip = Instance.new("Frame")
-		chip.LayoutOrder = index
-		chip.BackgroundTransparency = 1
-		chip.AutomaticSize = Enum.AutomaticSize.XY
-		chip.Parent = hud
-		local chipLayout = Instance.new("UIListLayout")
-		chipLayout.FillDirection = Enum.FillDirection.Vertical
-		chipLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		chipLayout.Parent = chip
-		local title = label(chip, string.upper(def.label), 11, Color3.fromRGB(130, 122, 110), true)
-		title.AutomaticSize = Enum.AutomaticSize.XY
-		title.LayoutOrder = 1
-		local value = label(chip, "-", 20, INK, true)
-		value.AutomaticSize = Enum.AutomaticSize.XY
-		value.LayoutOrder = 2
-		meterValueLabels[def.key] = value
-	end
-	-- inventory chip
-	local invChip = Instance.new("Frame")
-	invChip.LayoutOrder = #meterDefs + 1
-	invChip.BackgroundTransparency = 1
-	invChip.AutomaticSize = Enum.AutomaticSize.XY
-	invChip.Parent = hud
-	local invLayout = Instance.new("UIListLayout")
-	invLayout.FillDirection = Enum.FillDirection.Vertical
-	invLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	invLayout.Parent = invChip
-	local invTitle = label(invChip, "STOCK", 11, Color3.fromRGB(130, 122, 110), true)
-	invTitle.AutomaticSize = Enum.AutomaticSize.XY
-	invTitle.LayoutOrder = 1
-	local invValue = label(invChip, "-", 15, INK, true)
-	invValue.AutomaticSize = Enum.AutomaticSize.XY
-	invValue.LayoutOrder = 2
-	inventoryLabel = invValue
-	hud.Visible = true
-end
+local timeValue = chip("Time", 1)
+local revenueValue = chip("Revenue", 2)
+local starsValue = chip("Stars", 3)
+local scoreValue = chip("Score", 4)
+local stockLine: TextLabel? = nil -- lives in the talk panel, created below
 
 Remotes.get("State").OnClientEvent:Connect(function(state)
-	for key, valueLabel in meterValueLabels do
-		local value = state.meters[key]
-		if value ~= nil then
-			for _, def in meterDefs do
-				if def.key == key then
-					valueLabel.Text = formatMeter(def, value)
-				end
-			end
-		end
+	revenueValue.Text = money(state.revenue)
+	starsValue.Text = stars(state.avgStars)
+	scoreValue.Text = tostring(state.score)
+	local bits = {}
+	for key, count in state.stock do
+		table.insert(bits, (menuLabels[key] or key) .. " " .. tostring(count))
 	end
-	if inventoryLabel then
-		local bits = {}
-		for key, count in state.inventory do
-			table.insert(bits, (inventoryLabels[key] or key) .. " " .. tostring(count))
-		end
-		table.sort(bits)
-		inventoryLabel.Text = table.concat(bits, "   ")
+	table.sort(bits)
+	if stockLine then
+		stockLine.Text = "Stock left: " .. table.concat(bits, " · ")
 	end
 end)
+
+-- ---------- leaderboard (top right) ----------
+
+local board = panel(gui, "Leaderboard", INK)
+board.AnchorPoint = Vector2.new(1, 0)
+board.Position = UDim2.new(1, -16, 0, 12)
+board.Size = UDim2.new(0, 250, 0, 0)
+board.AutomaticSize = Enum.AutomaticSize.Y
+board.BackgroundTransparency = 0.15
+pad(board, 10)
+list(board, false, 4)
+label(board, "LEADERBOARD", 11, GOLD, true, 0).Size = UDim2.new(1, 0, 0, 14)
+local boardRows = Instance.new("Frame")
+boardRows.Name = "Rows"
+boardRows.BackgroundTransparency = 1
+boardRows.Size = UDim2.new(1, 0, 0, 0)
+boardRows.AutomaticSize = Enum.AutomaticSize.Y
+boardRows.LayoutOrder = 1
+boardRows.Parent = board
+list(boardRows, false, 2)
+
+local function renderBoard(rows: { any })
+	clear(boardRows)
+	for rank, row in rows do
+		local mine = row.userId == player.UserId
+		local text = string.format("%d. %s   %s  %s   %d pts", rank, row.name, money(row.revenue), stars(row.avgStars), row.score)
+		local l = para(boardRows, text, 14, if mine then GOLD else PAPER, mine, rank)
+		l.Font = if mine then Enum.Font.GothamBold else Enum.Font.Gotham
+	end
+	board.Visible = #rows > 0
+end
+Remotes.get("Leaderboard").OnClientEvent:Connect(renderBoard)
 
 -- ---------- toasts ----------
 
 local toastArea = Instance.new("Frame")
 toastArea.AnchorPoint = Vector2.new(0.5, 0)
-toastArea.Position = UDim2.new(0.5, 0, 0, 64)
-toastArea.Size = UDim2.new(0, 400, 0, 120)
+toastArea.Position = UDim2.new(0.5, 0, 0, 70)
+toastArea.Size = UDim2.new(0, 420, 0, 120)
 toastArea.BackgroundTransparency = 1
 toastArea.Parent = gui
-local toastLayout = Instance.new("UIListLayout")
-toastLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-toastLayout.Padding = UDim.new(0, 4)
-toastLayout.SortOrder = Enum.SortOrder.LayoutOrder
-toastLayout.Parent = toastArea
+list(toastArea, false, 4).HorizontalAlignment = Enum.HorizontalAlignment.Center
 
 local toastCount = 0
 Remotes.get("Toast").OnClientEvent:Connect(function(text: string)
@@ -201,12 +228,12 @@ Remotes.get("Toast").OnClientEvent:Connect(function(text: string)
 	toast.BackgroundTransparency = 0.15
 	toast.TextColor3 = Color3.fromRGB(255, 244, 222)
 	toast.Font = Enum.Font.GothamBold
-	toast.TextSize = 15
+	toast.TextSize = 16
 	toast.Text = "  " .. text .. "  "
 	toast.AutomaticSize = Enum.AutomaticSize.XY
 	toast.Parent = toastArea
 	round(toast, 8)
-	task.delay(2.6, function()
+	task.delay(3, function()
 		TweenService:Create(toast, TweenInfo.new(0.5), { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
 		task.delay(0.5, function()
 			toast:Destroy()
@@ -214,80 +241,76 @@ Remotes.get("Toast").OnClientEvent:Connect(function(text: string)
 	end)
 end)
 
--- ---------- dialogue + choices + chat (bottom) ----------
+-- ---------- conversation (bottom) ----------
 
 local bottom = Instance.new("Frame")
+bottom.Name = "Bottom"
 bottom.AnchorPoint = Vector2.new(0.5, 1)
 bottom.Position = UDim2.new(0.5, 0, 1, -16)
-bottom.Size = UDim2.new(0, 620, 0, 0)
+bottom.Size = UDim2.new(0, 640, 0, 0)
 bottom.AutomaticSize = Enum.AutomaticSize.Y
 bottom.BackgroundTransparency = 1
 bottom.Visible = false
 bottom.Parent = gui
-local bottomLayout = Instance.new("UIListLayout")
-bottomLayout.FillDirection = Enum.FillDirection.Vertical
-bottomLayout.Padding = UDim.new(0, 8)
-bottomLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-bottomLayout.SortOrder = Enum.SortOrder.LayoutOrder
-bottomLayout.Parent = bottom
+list(bottom, false, 8).HorizontalAlignment = Enum.HorizontalAlignment.Center
 
--- choices
-local choicesFrame = Instance.new("Frame")
-choicesFrame.Size = UDim2.new(1, 0, 0, 0)
-choicesFrame.AutomaticSize = Enum.AutomaticSize.Y
-choicesFrame.BackgroundTransparency = 1
-choicesFrame.LayoutOrder = 1
-choicesFrame.Parent = bottom
-local choicesLayout = Instance.new("UIListLayout")
-choicesLayout.FillDirection = Enum.FillDirection.Vertical
-choicesLayout.Padding = UDim.new(0, 6)
-choicesLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-choicesLayout.SortOrder = Enum.SortOrder.LayoutOrder
-choicesLayout.Parent = choicesFrame
+local talk = panel(bottom, "Talk")
+talk.Size = UDim2.new(1, 0, 0, 0)
+talk.AutomaticSize = Enum.AutomaticSize.Y
+talk.LayoutOrder = 1
+pad(talk, 14)
+list(talk, false, 6)
 
--- dialogue panel
-local dialogue = Instance.new("Frame")
-dialogue.Size = UDim2.new(1, 0, 0, 0)
-dialogue.AutomaticSize = Enum.AutomaticSize.Y
-dialogue.BackgroundColor3 = PAPER
-dialogue.BackgroundTransparency = 0.04
-dialogue.LayoutOrder = 2
-dialogue.Parent = bottom
-round(dialogue, 14)
-pad(dialogue, 14)
-local dialogueLayout = Instance.new("UIListLayout")
-dialogueLayout.FillDirection = Enum.FillDirection.Vertical
-dialogueLayout.Padding = UDim.new(0, 4)
-dialogueLayout.SortOrder = Enum.SortOrder.LayoutOrder
-dialogueLayout.Parent = dialogue
+local customerTitle = para(talk, "", 15, ACCENT, true, 1)
+customerTitle.Name = "CustomerTitle"
+local customerCue = para(talk, "", 13, MUTED, false, 2)
+customerCue.Name = "CustomerCue"
 
-local speakerLabel = label(dialogue, "", 13, ACCENT, true)
-speakerLabel.Size = UDim2.new(1, 0, 0, 16)
-speakerLabel.LayoutOrder = 1
-local textLabel = label(dialogue, "", 18, INK)
-textLabel.LayoutOrder = 2
-textLabel.Size = UDim2.new(1, 0, 0, 0)
-textLabel.AutomaticSize = Enum.AutomaticSize.Y
+local log = Instance.new("ScrollingFrame")
+log.Name = "Log"
+log.Size = UDim2.new(1, 0, 0, 120)
+log.BackgroundTransparency = 1
+log.BorderSizePixel = 0
+log.ScrollBarThickness = 4
+log.AutomaticCanvasSize = Enum.AutomaticSize.Y
+log.CanvasSize = UDim2.new(0, 0, 0, 0)
+log.LayoutOrder = 3
+log.Parent = talk
+list(log, false, 4)
 
--- chat row
+local typing = para(talk, "", 13, MUTED, false, 4)
+typing.Name = "Typing"
+stockLine = para(talk, "", 12, MUTED, false, 5)
+
+local logCount = 0
+local function addLine(speaker: string, text: string, kind: string)
+	logCount += 1
+	local line = para(log, "", 17, INK, false, logCount)
+	line.RichText = true
+	local color = if kind == "player" then "#4E70B4" else "#D67C30"
+	local safe = (text:gsub("&", "&amp;"):gsub("<", "&lt;"))
+	line.Text = string.format('<font color="%s"><b>%s</b></font>  %s', color, speaker, safe)
+	task.defer(function()
+		log.CanvasPosition = Vector2.new(0, math.max(0, log.AbsoluteCanvasSize.Y - log.AbsoluteSize.Y))
+	end)
+end
+
 local chatRow = Instance.new("Frame")
-chatRow.Size = UDim2.new(1, 0, 0, 40)
+chatRow.Name = "ChatRow"
+chatRow.Size = UDim2.new(1, 0, 0, 42)
 chatRow.BackgroundTransparency = 1
-chatRow.LayoutOrder = 3
+chatRow.LayoutOrder = 2
 chatRow.Parent = bottom
-local chatLayout = Instance.new("UIListLayout")
-chatLayout.FillDirection = Enum.FillDirection.Horizontal
-chatLayout.Padding = UDim.new(0, 8)
-chatLayout.SortOrder = Enum.SortOrder.LayoutOrder
-chatLayout.Parent = chatRow
+list(chatRow, true, 8)
 
 local chatBox = Instance.new("TextBox")
+chatBox.Name = "ChatBox"
 chatBox.Size = UDim2.new(1, -196, 1, 0)
 chatBox.BackgroundColor3 = PAPER_DIM
 chatBox.Font = Enum.Font.Gotham
 chatBox.TextSize = 16
 chatBox.TextColor3 = INK
-chatBox.PlaceholderText = "Say something to them..."
+chatBox.PlaceholderText = "Talk to your customer..."
 chatBox.Text = ""
 chatBox.ClearTextOnFocus = false
 chatBox.LayoutOrder = 1
@@ -295,17 +318,15 @@ chatBox.Parent = chatRow
 round(chatBox, 10)
 pad(chatBox, 6)
 
-local sendButton = button(chatRow, "Reply", INK, PAPER)
+local sendButton = button(chatRow, "ReplyButton", "Reply", INK, PAPER, 2)
 sendButton.Size = UDim2.new(0, 90, 1, 0)
-sendButton.LayoutOrder = 2
-
-local hintButton = button(chatRow, "Coach", COACH, Color3.fromRGB(255, 255, 255))
+local hintButton = button(chatRow, "CoachButton", "Coach", COACH, Color3.fromRGB(255, 255, 255), 3)
 hintButton.Size = UDim2.new(0, 90, 1, 0)
-hintButton.LayoutOrder = 3
 
+local hasCustomer = false
 local function sendChat()
 	local text = chatBox.Text
-	if #text:gsub("%s", "") == 0 then
+	if #text:gsub("%s", "") == 0 or not hasCustomer then
 		return
 	end
 	chatBox.Text = ""
@@ -318,69 +339,47 @@ chatBox.FocusLost:Connect(function(enterPressed)
 	end
 end)
 hintButton.Activated:Connect(function()
-	Remotes.get("RequestHint"):FireServer()
+	if hasCustomer then
+		Remotes.get("RequestHint"):FireServer()
+	end
+end)
+
+Remotes.get("Customer").OnClientEvent:Connect(function(visible)
+	clear(log)
+	logCount = 0
+	typing.Text = ""
+	if visible then
+		hasCustomer = true
+		customerTitle.Text = visible.name
+		local article = if string.find("aeiou", string.sub(visible.ageGroup, 1, 1), 1, true) then "An" else "A"
+		customerCue.Text = string.format("%s %s customer, %s.", article, visible.ageGroup, visible.situation)
+	else
+		hasCustomer = false
+		customerTitle.Text = "Next customer coming..."
+		customerCue.Text = ""
+	end
 end)
 
 Remotes.get("Dialogue").OnClientEvent:Connect(function(speaker: string, text: string, kind: string?)
-	speakerLabel.Text = speaker
-	speakerLabel.TextColor3 = kind == "player" and COACH or ACCENT
-	textLabel.Text = text
+	addLine(speaker, text, kind or "npc")
 end)
 
-Remotes.get("Choices").OnClientEvent:Connect(function(choices)
-	for _, child in choicesFrame:GetChildren() do
-		if child:IsA("TextButton") then
-			child:Destroy()
-		end
-	end
-	for index, choice in choices do
-		local b = button(choicesFrame, choice.label, Color3.fromRGB(255, 252, 245), INK)
-		b.LayoutOrder = index
-		b.Size = UDim2.new(1, 0, 0, 38)
-		b.TextSize = 15
-		local stroke = Instance.new("UIStroke")
-		stroke.Color = Color3.fromRGB(205, 192, 170)
-		stroke.Thickness = 1
-		stroke.Parent = b
-		b.Activated:Connect(function()
-			Remotes.get("Choose"):FireServer(choice.id)
-		end)
-	end
-end)
-
--- busy ("...") indicator
-Remotes.get("Busy").OnClientEvent:Connect(function(busy: boolean)
-	if busy then
-		speakerLabel.Text = speakerLabel.Text:gsub(" •••$", "") .. " •••"
-	else
-		speakerLabel.Text = speakerLabel.Text:gsub(" •••$", "")
-	end
+Remotes.get("Busy").OnClientEvent:Connect(function(busy: boolean, who: string?)
+	typing.Text = if busy then (who or "They") .. " is thinking..." else ""
 end)
 
 -- ---------- coach bubble ----------
 
-local coachBubble = Instance.new("Frame")
-coachBubble.AnchorPoint = Vector2.new(1, 0)
-coachBubble.Position = UDim2.new(1, -16, 0, 80)
-coachBubble.Size = UDim2.new(0, 300, 0, 0)
+local coachBubble = panel(gui, "CoachBubble", COACH)
+coachBubble.AnchorPoint = Vector2.new(1, 1)
+coachBubble.Position = UDim2.new(1, -16, 1, -24)
+coachBubble.Size = UDim2.new(0, 280, 0, 0)
 coachBubble.AutomaticSize = Enum.AutomaticSize.Y
-coachBubble.BackgroundColor3 = COACH
 coachBubble.Visible = false
-coachBubble.Parent = gui
-round(coachBubble, 12)
 pad(coachBubble, 12)
-local coachLayout = Instance.new("UIListLayout")
-coachLayout.FillDirection = Enum.FillDirection.Vertical
-coachLayout.Padding = UDim.new(0, 4)
-coachLayout.SortOrder = Enum.SortOrder.LayoutOrder
-coachLayout.Parent = coachBubble
-local coachTitle = label(coachBubble, "COACH", 11, Color3.fromRGB(205, 220, 255), true)
-coachTitle.AutomaticSize = Enum.AutomaticSize.XY
-coachTitle.LayoutOrder = 1
-local coachText = label(coachBubble, "", 15, Color3.fromRGB(255, 255, 255))
-coachText.LayoutOrder = 2
-coachText.Size = UDim2.new(1, 0, 0, 0)
-coachText.AutomaticSize = Enum.AutomaticSize.Y
+list(coachBubble, false, 4)
+label(coachBubble, "COACH", 11, Color3.fromRGB(205, 220, 255), true, 1).AutomaticSize = Enum.AutomaticSize.XY
+local coachText = para(coachBubble, "", 15, Color3.fromRGB(255, 255, 255), false, 2)
 
 local coachHideThread: thread? = nil
 Remotes.get("CoachHint").OnClientEvent:Connect(function(hint: string)
@@ -389,15 +388,16 @@ Remotes.get("CoachHint").OnClientEvent:Connect(function(hint: string)
 	if coachHideThread then
 		task.cancel(coachHideThread)
 	end
-	coachHideThread = task.delay(8, function()
+	coachHideThread = task.delay(10, function()
 		coachBubble.Visible = false
 	end)
 end)
 
 -- ---------- overlays ----------
 
-local function makeOverlay(): Frame
+local function makeOverlay(name: string): Frame
 	local overlay = Instance.new("Frame")
+	overlay.Name = name
 	overlay.Size = UDim2.fromScale(1, 1)
 	overlay.BackgroundColor3 = Color3.fromRGB(24, 22, 20)
 	overlay.BackgroundTransparency = 0.12
@@ -407,197 +407,255 @@ local function makeOverlay(): Frame
 	return overlay
 end
 
--- Intro
-local introOverlay = makeOverlay()
-local introCard = Instance.new("Frame")
-introCard.AnchorPoint = Vector2.new(0.5, 0.5)
-introCard.Position = UDim2.fromScale(0.5, 0.5)
-introCard.Size = UDim2.new(0, 560, 0, 0)
-introCard.AutomaticSize = Enum.AutomaticSize.Y
-introCard.BackgroundColor3 = PAPER
-introCard.ZIndex = 6
-introCard.Parent = introOverlay
-round(introCard, 16)
-pad(introCard, 24)
-local introLayout = Instance.new("UIListLayout")
-introLayout.FillDirection = Enum.FillDirection.Vertical
-introLayout.Padding = UDim.new(0, 12)
-introLayout.SortOrder = Enum.SortOrder.LayoutOrder
-introLayout.Parent = introCard
+local function card(parent: Instance, name: string, width: number, scrolling: boolean): GuiObject
+	local c: GuiObject
+	if scrolling then
+		local s = Instance.new("ScrollingFrame")
+		s.ScrollBarThickness = 6
+		s.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		s.CanvasSize = UDim2.new(0, 0, 0, 0)
+		s.Size = UDim2.new(0, width, 0.86, 0)
+		c = s
+	else
+		local f = Instance.new("Frame")
+		f.Size = UDim2.new(0, width, 0, 0)
+		f.AutomaticSize = Enum.AutomaticSize.Y
+		c = f
+	end
+	c.Name = name
+	c.AnchorPoint = Vector2.new(0.5, 0.5)
+	c.Position = UDim2.fromScale(0.5, 0.5)
+	c.BackgroundColor3 = PAPER
+	c.ZIndex = 6
+	c.Parent = parent
+	round(c, 16)
+	pad(c, 24)
+	list(c, false, 10)
+	return c
+end
 
-local introKicker = label(introCard, "KIDSIM — ISAAC SIM FOR CHILDREN", 12, ACCENT, true)
-introKicker.ZIndex = 6
-introKicker.LayoutOrder = 1
-introKicker.Size = UDim2.new(1, 0, 0, 14)
-local introTitle = label(introCard, "", 32, INK, true)
-introTitle.ZIndex = 6
-introTitle.LayoutOrder = 2
-introTitle.Size = UDim2.new(1, 0, 0, 0)
-introTitle.AutomaticSize = Enum.AutomaticSize.Y
-local introThesis = label(introCard, "", 18, Color3.fromRGB(100, 92, 80), true)
-introThesis.ZIndex = 6
-introThesis.LayoutOrder = 3
-introThesis.Size = UDim2.new(1, 0, 0, 0)
-introThesis.AutomaticSize = Enum.AutomaticSize.Y
-local introBriefing = label(introCard, "", 16, INK)
-introBriefing.ZIndex = 6
-introBriefing.LayoutOrder = 4
-introBriefing.Size = UDim2.new(1, 0, 0, 0)
-introBriefing.AutomaticSize = Enum.AutomaticSize.Y
-local startButton = button(introCard, "Start my shift", ACCENT, Color3.fromRGB(255, 255, 255))
-startButton.ZIndex = 6
-startButton.LayoutOrder = 5
+-- Lobby
+local lobbyOverlay = makeOverlay("LobbyOverlay")
+local lobbyCard = card(lobbyOverlay, "LobbyCard", 580, false)
+para(lobbyCard, "KIDSIM — ISAAC SIM FOR CHILDREN", 12, ACCENT, true, 1)
+local lobbyTitle = para(lobbyCard, "", 32, INK, true, 2)
+local lobbyThesis = para(lobbyCard, "", 18, SOFT, true, 3)
+local lobbyBriefing = para(lobbyCard, "", 16, INK, false, 4)
+local lobbyMenu = para(lobbyCard, "", 14, SOFT, false, 5)
+local lobbyLane = para(lobbyCard, "", 14, ACCENT, true, 6)
+local startButton = button(lobbyCard, "StartButton", "Start the round", ACCENT, Color3.fromRGB(255, 255, 255), 7)
 startButton.Size = UDim2.new(1, 0, 0, 46)
 startButton.Activated:Connect(function()
-	Remotes.get("Continue"):FireServer()
+	Remotes.get("StartRound"):FireServer()
 end)
 
--- Close
-local closeOverlay = makeOverlay()
-local closeLabel = label(closeOverlay, "Closing up the shop...\nYour coach is writing your debrief.", 24, PAPER, true)
-closeLabel.ZIndex = 6
-closeLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-closeLabel.Position = UDim2.fromScale(0.5, 0.5)
-closeLabel.Size = UDim2.new(0, 600, 0, 120)
-closeLabel.TextXAlignment = Enum.TextXAlignment.Center
+-- Waiting banner (joined mid-round or all counters full)
+local waitingBanner = panel(gui, "WaitingBanner", INK)
+waitingBanner.AnchorPoint = Vector2.new(0.5, 1)
+waitingBanner.Position = UDim2.new(0.5, 0, 1, -24)
+waitingBanner.Size = UDim2.new(0, 460, 0, 0)
+waitingBanner.AutomaticSize = Enum.AutomaticSize.Y
+waitingBanner.Visible = false
+pad(waitingBanner, 12)
+list(waitingBanner, false, 0)
+local waitingText = para(waitingBanner, "", 16, PAPER, true, 1)
+waitingText.TextXAlignment = Enum.TextXAlignment.Center
 
--- Debrief
-local debriefOverlay = makeOverlay()
-local debriefCard = Instance.new("ScrollingFrame")
-debriefCard.AnchorPoint = Vector2.new(0.5, 0.5)
-debriefCard.Position = UDim2.fromScale(0.5, 0.5)
-debriefCard.Size = UDim2.new(0, 640, 0.86, 0)
-debriefCard.BackgroundColor3 = PAPER
-debriefCard.ScrollBarThickness = 6
-debriefCard.AutomaticCanvasSize = Enum.AutomaticSize.Y
-debriefCard.CanvasSize = UDim2.new(0, 0, 0, 0)
-debriefCard.ZIndex = 6
-debriefCard.Parent = debriefOverlay
-round(debriefCard, 16)
-pad(debriefCard, 24)
-local debriefLayout = Instance.new("UIListLayout")
-debriefLayout.FillDirection = Enum.FillDirection.Vertical
-debriefLayout.Padding = UDim.new(0, 10)
-debriefLayout.SortOrder = Enum.SortOrder.LayoutOrder
-debriefLayout.Parent = debriefCard
+-- Countdown / closing
+local bigOverlay = makeOverlay("BigOverlay")
+bigOverlay.BackgroundTransparency = 0.45
+local bigText = label(bigOverlay, "", 64, PAPER, true)
+bigText.ZIndex = 6
+bigText.AnchorPoint = Vector2.new(0.5, 0.5)
+bigText.Position = UDim2.fromScale(0.5, 0.5)
+bigText.Size = UDim2.new(0, 700, 0, 200)
+bigText.TextXAlignment = Enum.TextXAlignment.Center
 
-local function clearDebrief()
-	for _, child in debriefCard:GetChildren() do
-		if child:IsA("GuiObject") then
-			child:Destroy()
+-- Debrief / results
+local debriefOverlay = makeOverlay("DebriefOverlay")
+local debriefCard = card(debriefOverlay, "DebriefCard", 660, true)
+
+local function setZ(container: Instance)
+	for _, d in container:GetDescendants() do
+		if d:IsA("GuiObject") then
+			d.ZIndex = 6
 		end
 	end
 end
-
-local function debriefLine(text: string, size: number, color: Color3?, bold: boolean?, order: number): TextLabel
-	local l = label(debriefCard, text, size, color, bold)
-	l.ZIndex = 6
-	l.Size = UDim2.new(1, 0, 0, 0)
-	l.AutomaticSize = Enum.AutomaticSize.Y
-	l.LayoutOrder = order
-	return l
-end
+setZ(lobbyCard)
 
 Remotes.get("Debrief").OnClientEvent:Connect(function(payload)
-	clearDebrief()
+	clear(debriefCard)
 	local order = 0
 	local function nextOrder(): number
 		order += 1
 		return order
 	end
+	local function line(text: string, size: number, color: Color3?, bold: boolean?): TextLabel
+		return para(debriefCard, text, size, color, bold, nextOrder())
+	end
 
-	debriefLine("SHIFT DEBRIEF — " .. string.upper(payload.title or ""), 12, ACCENT, true, nextOrder())
-	debriefLine("What you just practiced, for real.", 28, INK, true, nextOrder())
+	line("ROUND RESULTS — " .. string.upper(payload.title or "KidSim"), 12, ACCENT, true)
+	local boardRows = payload.leaderboard or {}
+	if payload.rank then
+		line(string.format("You placed #%d of %d", payload.rank, #boardRows), 30, INK, true)
+	else
+		line("This round's results", 30, INK, true)
+	end
 
-	-- meters before -> after
-	for _, def in (payload.meters or {}) do
-		local before = payload.initialMeters[def.key] or 0
-		local after = payload.finalMeters[def.key] or 0
-		local delta = after - before
-		local arrow = delta > 0 and "▲" or (delta < 0 and "▼" or "—")
-		local deltaColor = GOOD
-		if def.key == "waste" then
-			deltaColor = delta > 0 and BAD or GOOD
-		elseif delta < 0 then
-			deltaColor = BAD
-		end
-		local line = debriefLine(
-			def.label .. ":  " .. formatMeter(def, before) .. "  →  " .. formatMeter(def, after) .. "   " .. arrow,
-			18,
-			delta == 0 and INK or deltaColor,
-			true,
-			nextOrder()
+	line("LEADERBOARD", 12, MUTED, true)
+	for rank, row in boardRows do
+		local mine = row.userId == player.UserId
+		local l = line(
+			string.format("%d. %-14s %6s   %s   %d served   %d pts", rank, row.name, money(row.revenue), stars(row.avgStars), row.served, row.score),
+			16,
+			if mine then ACCENT else INK,
+			mine
 		)
-		line.Font = Enum.Font.Code
+		l.Font = Enum.Font.Code
 	end
 
-	local evaluation = payload.evaluation or {}
+	local stats = payload.stats
+	if stats then
+		line("YOUR COUNTER", 12, MUTED, true)
+		local capture = if stats.walletSeen > 0 then math.floor(stats.revenue / stats.walletSeen * 100 + 0.5) else 0
+		line(string.format("You earned %s of the %s your customers had in their wallets (%d%%).", money(stats.revenue), money(stats.walletSeen), capture), 18, INK, true)
+		line(string.format("Average happiness %s  ·  score %d = revenue + happiness bonus", stars(stats.avgStars), stats.score), 15, SOFT, false)
 
-	debriefLine("SKILLS YOU PRACTICED", 12, Color3.fromRGB(130, 122, 110), true, nextOrder())
-	for _, skill in (evaluation.skills or {}) do
-		debriefLine("● " .. (skill.name or skill.tag or "?"), 18, INK, true, nextOrder())
-		debriefLine("    " .. (skill.evidence or ""), 15, Color3.fromRGB(100, 92, 80), false, nextOrder())
-	end
-
-	if evaluation.wentWell and #evaluation.wentWell > 0 then
-		debriefLine("WHAT WENT WELL", 12, GOOD, true, nextOrder())
-		for _, item in evaluation.wentWell do
-			debriefLine("+ " .. item, 15, INK, false, nextOrder())
+		for _, r in (payload.records or {}) do
+			local bought = {}
+			for key, qty in r.items do
+				table.insert(bought, tostring(qty) .. " " .. (menuLabels[key] or key))
+			end
+			local what = if #bought > 0 then table.concat(bought, ", ") else "nothing"
+			local starText = string.rep("★", r.stars) .. string.rep("☆", 5 - r.stars)
+			line(
+				string.format("%s (%s, had %s) — bought %s for %s   %s", r.customer, r.ageGroup, money(r.wallet), what, money(r.paid), starText),
+				14,
+				if r.stars >= 4 then GOOD elseif r.stars <= 2 then BAD else INK,
+				false
+			)
 		end
-	end
-	if evaluation.wentWrong and #evaluation.wentWrong > 0 then
-		debriefLine("WHAT TO WATCH", 12, BAD, true, nextOrder())
-		for _, item in evaluation.wentWrong do
-			debriefLine("– " .. item, 15, INK, false, nextOrder())
+
+		local evaluation = payload.evaluation or {}
+		line("SKILLS YOU PRACTICED", 12, MUTED, true)
+		for _, skill in (evaluation.skills or {}) do
+			line("● " .. (skill.name or skill.tag or "?"), 18, INK, true)
+			local evidence = line(skill.evidence or "", 15, SOFT, false)
+			local indent = Instance.new("UIPadding")
+			indent.PaddingLeft = UDim.new(0, 18)
+			indent.Parent = evidence
 		end
+		if evaluation.wentWell and #evaluation.wentWell > 0 then
+			line("WHAT WENT WELL", 12, GOOD, true)
+			for _, item in evaluation.wentWell do
+				line("+ " .. item, 15, INK, false)
+			end
+		end
+		if evaluation.wentWrong and #evaluation.wentWrong > 0 then
+			line("WHAT TO WATCH", 12, BAD, true)
+			for _, item in evaluation.wentWrong do
+				line("– " .. item, 15, INK, false)
+			end
+		end
+		line("IN THE REAL WORLD", 12, MUTED, true)
+		line(evaluation.realWorldTransfer or "", 19, INK, true)
+		line("NEXT DRILL", 12, MUTED, true)
+		line(evaluation.nextDrill or "", 17, INK, false)
+		line(payload.thesis or "", 14, ACCENT, true)
 	end
 
-	debriefLine("IN THE REAL WORLD", 12, Color3.fromRGB(130, 122, 110), true, nextOrder())
-	debriefLine(evaluation.realWorldTransfer or "", 19, INK, true, nextOrder())
-
-	debriefLine("NEXT DRILL", 12, Color3.fromRGB(130, 122, 110), true, nextOrder())
-	debriefLine(evaluation.nextDrill or "", 17, INK, false, nextOrder())
-
-	debriefLine(payload.thesis or "", 14, ACCENT, true, nextOrder())
-
-	local again = button(debriefCard, "Run another shift", INK, PAPER)
-	again.ZIndex = 6
+	local again = button(debriefCard, "AgainButton", "Back to the lobby", INK, PAPER, nextOrder())
 	again.Size = UDim2.new(1, 0, 0, 44)
-	again.LayoutOrder = nextOrder()
 	again.Activated:Connect(function()
-		debriefOverlay.Visible = false
 		Remotes.get("Continue"):FireServer()
 	end)
+	setZ(debriefCard)
+	;(debriefCard :: ScrollingFrame).CanvasPosition = Vector2.new(0, 0)
 
-	closeOverlay.Visible = false
+	bigOverlay.Visible = false
 	debriefOverlay.Visible = true
+end)
+
+-- ---------- timer ----------
+
+Remotes.get("Timer").OnClientEvent:Connect(function(seconds: number, kind: string)
+	if kind == "countdown" then
+		bigText.Text = tostring(seconds)
+	else
+		timeValue.Text = string.format("%d:%02d", seconds // 60, seconds % 60)
+		timeValue.TextColor3 = if seconds <= 20 then BAD else INK
+	end
 end)
 
 -- ---------- phase routing ----------
 
+local function hideAll()
+	lobbyOverlay.Visible = false
+	bigOverlay.Visible = false
+	debriefOverlay.Visible = false
+	waitingBanner.Visible = false
+	bottom.Visible = false
+	coachBubble.Visible = false
+	hud.Visible = false
+end
+
+local function applyLobby(payload)
+	for _, item in (payload.menu or {}) do
+		menuLabels[item.key] = item.label
+	end
+	lobbyTitle.Text = payload.title or ""
+	lobbyThesis.Text = "“" .. (payload.thesis or "") .. "”"
+	lobbyBriefing.Text = payload.briefing or ""
+	local menuBits = {}
+	for _, item in (payload.menu or {}) do
+		table.insert(menuBits, item.label .. " " .. money(item.price))
+	end
+	lobbyMenu.Text = "Menu: " .. table.concat(menuBits, " · ") .. string.format("   ·   Round: %d min", (payload.roundSeconds or 180) // 60)
+	if payload.lane then
+		lobbyLane.Text = string.format("Your counter: #%d. Anyone can start the round for everyone.", payload.lane)
+		startButton.Visible = true
+	else
+		lobbyLane.Text = "All counters are taken — you're watching this time."
+		startButton.Visible = false
+	end
+end
+
 Remotes.get("Phase").OnClientEvent:Connect(function(phase: string, payload)
-	if phase == "intro" then
-		meterDefs = payload.meters or {}
-		inventoryLabels = payload.inventoryLabels or {}
-		buildHud()
-		introTitle.Text = payload.title or ""
-		introThesis.Text = "“" .. (payload.thesis or "") .. "”"
-		introBriefing.Text = payload.briefing or ""
-		debriefOverlay.Visible = false
-		closeOverlay.Visible = false
+	if phase == "lobby" then
+		hideAll()
+		applyLobby(payload)
+		lobbyOverlay.Visible = true
+	elseif phase == "waiting" then
+		applyLobby(payload)
+		lobbyOverlay.Visible = false
 		bottom.Visible = false
-		introOverlay.Visible = true
-	elseif phase == "shift" then
-		introOverlay.Visible = false
+		hud.Visible = false
+		waitingText.Text = if payload.lanesFull
+			then "All counters are taken — watching the leaderboard."
+			else "A round is in progress. You'll get a counter next round!"
+		waitingBanner.Visible = not debriefOverlay.Visible
+	elseif phase == "countdown" then
+		hideAll()
+		hud.Visible = true
+		revenueValue.Text, starsValue.Text, scoreValue.Text = "$0", "–", "0"
+		bigText.Text = "Get ready..."
+		bigText.TextSize = 72
+		bigOverlay.Visible = true
+	elseif phase == "running" then
+		hideAll()
+		hud.Visible = true
 		bottom.Visible = true
-	elseif phase == "incident" then
-		speakerLabel.Text = payload.counterpart or ""
-		textLabel.Text = ""
-	elseif phase == "close" then
+		hasCustomer = false
+		customerTitle.Text = "Next customer coming..."
+		customerCue.Text = ""
+		clear(log)
+	elseif phase == "closing" then
 		bottom.Visible = false
 		coachBubble.Visible = false
-		closeOverlay.Visible = true
-	elseif phase == "debrief" then
-		-- Debrief remote carries the payload; overlay switch happens there.
+		hasCustomer = false
+		bigText.Text = "Time's up!\nYour coach is writing your debrief."
+		bigText.TextSize = 30
+		bigOverlay.Visible = true
 	end
 end)

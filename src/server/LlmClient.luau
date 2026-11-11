@@ -11,6 +11,7 @@ export type ChatMessage = { role: string, content: string }
 export type ChatOptions = {
 	maxTokens: number?,
 	temperature: number?,
+	jsonMode: boolean?, -- ask for response_format json_object (dropped if the endpoint rejects it)
 }
 
 local LlmClient = {}
@@ -23,6 +24,7 @@ type Settings = {
 
 local cachedSettings: Settings? = nil
 local warnedOnce = false
+local jsonModeUnsupported = false
 
 local function resolveSettings(): Settings?
 	if cachedSettings then
@@ -95,15 +97,23 @@ function LlmClient.chat(messages: { ChatMessage }, opts: ChatOptions?): (boolean
 	end
 
 	local options: ChatOptions = opts or {}
-	local body = HttpService:JSONEncode({
-		model = settings.model,
-		messages = messages,
-		max_tokens = options.maxTokens or Config.MAX_TOKENS_DIALOGUE,
-		temperature = options.temperature or 0.7,
-	})
+	local function encode(withJson: boolean): string
+		local request: { [string]: any } = {
+			model = settings.model,
+			messages = messages,
+			max_tokens = options.maxTokens or Config.MAX_TOKENS_CUSTOMER,
+			temperature = options.temperature or 0.7,
+		}
+		if withJson then
+			request.response_format = { type = "json_object" }
+		end
+		return HttpService:JSONEncode(request)
+	end
+	local useJson = options.jsonMode == true and not jsonModeUnsupported
 
 	local lastErr = "unknown"
 	for attempt = 1, 2 do
+		local body = encode(useJson)
 		local ok, response = pcall(function()
 			return HttpService:RequestAsync({
 				Url = settings.baseUrl .. "/chat/completions",
@@ -129,6 +139,11 @@ function LlmClient.chat(messages: { ChatMessage }, opts: ChatOptions?): (boolean
 			lastErr = "bad-response-shape"
 		elseif ok then
 			lastErr = "http-" .. tostring(response.StatusCode) .. ": " .. string.sub(response.Body or "", 1, 200)
+			-- some OpenAI-compatible hosts reject response_format; retry plain
+			if useJson and response.StatusCode == 400 then
+				useJson = false
+				jsonModeUnsupported = true
+			end
 		else
 			lastErr = tostring(response)
 		end

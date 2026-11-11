@@ -1,74 +1,91 @@
 --!strict
 -- Scenario pack contract. The engine knows ONLY these shapes — nothing
--- cafe-specific. A new pack (court, negotiation, accounting) is a new
--- module returning a Pack; engine code does not change.
+-- cafe-specific. A pack supplies a menu, a stock, rules for generating
+-- random customers, and the persona prompts. Every customer is an agent:
+-- the child talks, the customer decides what to buy and how happy it is.
 
-export type MeterDef = {
-	key: string, -- generic state key, e.g. "cash", "reputation"
-	label: string, -- what the HUD prints
-	format: string, -- "currency" | "number" | "score"
-	max: number?, -- optional clamp ceiling (e.g. reputation 100)
+export type MenuItem = {
+	key: string, -- stock key, e.g. "coffee"
+	label: string, -- what the HUD / menu board prints
+	price: number, -- menu price in whole dollars
 }
 
-export type Deltas = {
-	meters: { [string]: number }?,
-	inventory: { [string]: number }?,
+export type AgeGroup = {
+	label: string, -- "kid", "teen", "adult", "senior"
+	budgetMin: number,
+	budgetMax: number,
+	weight: number, -- relative spawn weight
 }
 
-export type Choice = {
-	id: string,
-	label: string,
-	deltas: Deltas,
-	-- inventory needed for this choice to be offered (engine filters)
-	requires: { [string]: number }?,
-	reaction: string, -- counterpart's scripted closing line
-	logLine: string, -- what the shift log records (evaluator reads this)
-	lessonTag: string?, -- which skillTag this choice exercises
+export type Sensitivity = {
+	label: string, -- shown nowhere; prompt flavour only
+	prompt: string, -- how this customer feels about prices and upsells
 }
 
-export type PackEvent = {
-	id: string,
-	title: string,
-	counterpart: {
-		name: string,
-		look: string?, -- hint for the world builder (color name)
-		persona: string, -- system prompt fragment for the counterpart LLM
-	},
-	opening: string, -- scripted first line (never depends on the LLM)
-	context: string, -- scene facts handed to the LLM
-	coachNote: string, -- what the coach may nudge toward (not the answer)
-	choices: { Choice },
+export type CustomerSpec = {
+	names: { string },
+	looks: { string }, -- colour names the world builder understands
+	ageGroups: { AgeGroup },
+	situations: { string }, -- the visible cue the shopkeeper can read
+	tastes: { string }, -- hidden: what actually tempts them
+	sensitivities: { Sensitivity },
+	patienceMin: number, -- how many player lines before they must decide
+	patienceMax: number,
+}
+
+-- One generated customer. `wallet`, `taste`, `sensitivity` are hidden from
+-- the client; the server only ever sends the visible slice.
+export type CustomerProfile = {
+	id: number,
+	name: string,
+	look: string,
+	ageGroup: string,
+	situation: string,
+	taste: string,
+	sensitivity: Sensitivity,
+	wallet: number,
+	patience: number,
 }
 
 export type Pack = {
 	id: string,
 	title: string,
-	thesis: string, -- the one-line product thesis shown at Intro
+	thesis: string, -- the one-line product thesis shown in the lobby
 	briefing: string, -- what the player is about to do
 	skillTags: { string },
-	meters: { MeterDef },
-	inventoryLabels: { [string]: string },
-	initialState: {
-		meters: { [string]: number },
-		inventory: { [string]: number },
-	},
-	menuText: string?, -- optional world dressing (menu board etc.)
+	menu: { MenuItem },
+	initialStock: { [string]: number }, -- per player, per round
+	customers: CustomerSpec,
 	cast: {
-		counterpartBase: string, -- guardrails shared by all counterparts
+		customerBase: string, -- guardrails shared by every customer
 		coach: string,
 		evaluator: string,
 	},
-	events: { PackEvent },
 	debriefTemplate: string, -- evaluator guidance for sim-to-real transfer
 }
 
-export type LogEntry = {
-	eventId: string,
-	eventTitle: string,
+-- What a customer agent decided this turn (after server validation).
+export type CustomerTurn = {
+	say: string,
+	decision: string, -- "stay" | "buy" | "leave"
+	items: { [string]: number },
+	pay: number,
+	stars: number, -- 1..5, only meaningful on buy/leave
+}
+
+export type SaleRecord = {
+	customer: string,
+	ageGroup: string,
+	situation: string,
+	taste: string,
+	sensitivity: string,
+	wallet: number,
 	playerSaid: { string },
-	choiceId: string,
-	logLine: string,
-	lessonTag: string?,
+	outcome: string, -- "bought" | "left" | "timeout"
+	items: { [string]: number },
+	paid: number,
+	menuValue: number, -- menu price of what they took
+	stars: number,
 }
 
 export type Evaluation = {
@@ -77,6 +94,16 @@ export type Evaluation = {
 	wentWrong: { string },
 	realWorldTransfer: string,
 	nextDrill: string,
+}
+
+export type LeaderboardRow = {
+	userId: number,
+	name: string,
+	lane: number,
+	revenue: number,
+	avgStars: number,
+	served: number,
+	score: number,
 }
 
 return {}

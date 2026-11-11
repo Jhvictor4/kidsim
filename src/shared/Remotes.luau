@@ -7,11 +7,12 @@ local RunService = game:GetService("RunService")
 
 local FOLDER_NAME = "KidSimRemotes"
 
--- server -> client: Phase, State, Dialogue, Choices, CoachHint, Debrief, Toast, Busy
--- client -> server: Say, Choose, RequestHint, Continue
+-- server -> client: Phase, State, Customer, Dialogue, CoachHint, Debrief,
+--                   Toast, Busy, Leaderboard, Timer
+-- client -> server: Say, RequestHint, StartRound, Continue
 local NAMES = {
-	"Phase", "State", "Dialogue", "Choices", "CoachHint", "Debrief", "Toast", "Busy",
-	"Say", "Choose", "RequestHint", "Continue",
+	"Phase", "State", "Customer", "Dialogue", "CoachHint", "Debrief", "Toast", "Busy", "Leaderboard", "Timer",
+	"Say", "RequestHint", "StartRound", "Continue",
 }
 
 local Remotes = {}
