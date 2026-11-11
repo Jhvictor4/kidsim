@@ -11,3 +11,6 @@ src/server/DevSecrets.luau
 
 # Prebuilt, key-free bundle (built without DevSecrets.luau)
 !dist/kidsim.rbxlx
+
+# Raw demo footage (large)
+demo/footage/*.mp4
