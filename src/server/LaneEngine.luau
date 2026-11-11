@@ -26,7 +26,9 @@ export type LaneHooks = {
 	spawnCustomer: (profile: CustomerProfile) -> (),
 	despawnCustomer: () -> (),
 	setSign: (title: string, subtitle: string) -> (),
+	showBubble: (text: string?) -> (),
 	spawnCFrame: CFrame,
+	cameraCFrame: CFrame,
 }
 
 export type LaneStats = {
@@ -131,6 +133,9 @@ end
 
 function LaneEngine.say(self: LaneEngineInstance, speaker: string, text: string, kind: string)
 	Remotes.get("Dialogue"):FireClient(self.player, speaker, text, kind)
+	if kind == "npc" then
+		self.lane.showBubble(text)
+	end
 end
 
 function LaneEngine.toast(self: LaneEngineInstance, text: string)
@@ -139,6 +144,9 @@ end
 
 function LaneEngine.busy(self: LaneEngineInstance, busy: boolean, who: string?)
 	Remotes.get("Busy"):FireClient(self.player, busy, who)
+	if busy then
+		self.lane.showBubble("…")
+	end
 end
 
 -- ---------- input ----------

@@ -119,8 +119,9 @@ function RoundManager.start(pack: Pack, world: World)
 		if phase == "lobby" then
 			Remotes.get("Phase"):FireClient(player, "lobby", lobbyPayload(player))
 		elseif phase == "countdown" or phase == "running" or phase == "closing" then
-			if engines[player] then
-				Remotes.get("Phase"):FireClient(player, phase, { lane = laneOf[player] })
+			local index = laneOf[player]
+			if engines[player] and index then
+				Remotes.get("Phase"):FireClient(player, phase, { lane = index, camera = world.lanes[index].cameraCFrame })
 			else
 				Remotes.get("Phase"):FireClient(player, "waiting", lobbyPayload(player))
 			end

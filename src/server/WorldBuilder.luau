@@ -187,7 +187,7 @@ function WorldBuilder.build(pack: Pack, laneCount: number)
 		local anchor = part({
 			Name = "SignAnchor",
 			Size = Vector3.new(1, 1, 1),
-			Position = Vector3.new(x, 9, COUNTER_Z),
+			Position = Vector3.new(x, 12, COUNTER_Z), -- above the lane camera's view
 			Transparency = 1,
 			CanCollide = false,
 			Parent = laneFolder,
@@ -265,6 +265,39 @@ function WorldBuilder.build(pack: Pack, laneCount: number)
 			nameGui.Parent = head
 			textLabel(nameGui, profile.name, Enum.Font.GothamBold, 18, Color3.fromRGB(255, 255, 255))
 
+			-- speech bubble: bottom edge sits just above the name tag
+			local bubbleGui = Instance.new("BillboardGui")
+			bubbleGui.Name = "Bubble"
+			bubbleGui.Size = UDim2.fromOffset(340, 160)
+			bubbleGui.SizeOffset = Vector2.new(0, 0.5)
+			bubbleGui.StudsOffset = Vector3.new(0, 2.1, 0)
+			-- not AlwaysOnTop: with it on, the bubble did not render in Studio play
+			bubbleGui.MaxDistance = 40
+			bubbleGui.Enabled = false
+			bubbleGui.Parent = head
+			local bubble = Instance.new("TextLabel")
+			bubble.Name = "Text"
+			bubble.AnchorPoint = Vector2.new(0.5, 1)
+			bubble.Position = UDim2.fromScale(0.5, 1)
+			bubble.Size = UDim2.new(1, 0, 0, 0)
+			bubble.AutomaticSize = Enum.AutomaticSize.Y
+			bubble.BackgroundColor3 = Color3.fromRGB(255, 252, 245)
+			bubble.TextColor3 = Color3.fromRGB(34, 32, 29)
+			bubble.Font = Enum.Font.Gotham
+			bubble.TextSize = 18
+			bubble.TextWrapped = true
+			bubble.Text = ""
+			bubble.Parent = bubbleGui
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(0, 12)
+			corner.Parent = bubble
+			local padding = Instance.new("UIPadding")
+			padding.PaddingTop = UDim.new(0, 10)
+			padding.PaddingBottom = UDim.new(0, 10)
+			padding.PaddingLeft = UDim.new(0, 12)
+			padding.PaddingRight = UDim.new(0, 12)
+			padding.Parent = bubble
+
 			npc.PrimaryPart = body
 			npc.Parent = laneFolder
 			currentNpc = npc
@@ -279,11 +312,28 @@ function WorldBuilder.build(pack: Pack, laneCount: number)
 			laneSub.Text = subtitle
 		end
 
+		-- nil hides the bubble
+		local function showBubble(text: string?)
+			local npc = currentNpc
+			local bubbleGui = npc and npc:FindFirstChild("Bubble", true) :: BillboardGui?
+			if not bubbleGui then
+				return
+			end
+			local bubble = bubbleGui:FindFirstChild("Text") :: TextLabel?
+			if bubble then
+				bubble.Text = text or ""
+			end
+			bubbleGui.Enabled = text ~= nil and text ~= ""
+		end
+
 		lanes[index] = {
 			spawnCustomer = spawnCustomer,
 			despawnCustomer = despawnCustomer,
 			setSign = setSign,
+			showBubble = showBubble,
 			spawnCFrame = CFrame.lookAt(Vector3.new(x, 3, BEHIND_Z), Vector3.new(x, 3, CUSTOMER_Z + 10)),
+			-- just in front of the shopkeeper, over the counter, at the customer's face
+			cameraCFrame = CFrame.lookAt(Vector3.new(x, 7.5, BEHIND_Z + 0.5), Vector3.new(x, 5.6, CUSTOMER_Z)),
 		}
 	end
 

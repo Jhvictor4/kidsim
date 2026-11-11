@@ -18,6 +18,17 @@ local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("Share
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
+-- The default Roblox chat window/input bar sat over the middle of the screen;
+-- all talking happens in our own bar, so switch both off.
+pcall(function()
+	local TextChatService = game:GetService("TextChatService")
+	TextChatService.ChatWindowConfiguration.Enabled = false
+	TextChatService.ChatInputBarConfiguration.Enabled = false
+end)
+pcall(function()
+	game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
+end)
+
 -- ---------- palette ----------
 local INK = Color3.fromRGB(34, 32, 29)
 local PAPER = Color3.fromRGB(248, 243, 234)
@@ -241,63 +252,54 @@ Remotes.get("Toast").OnClientEvent:Connect(function(text: string)
 	end)
 end)
 
--- ---------- conversation (bottom) ----------
+-- ---------- conversation (slim bar at the bottom) ----------
+-- The customer's lines appear in a speech bubble above their head (server-side
+-- BillboardGui), so the middle of the screen stays on the NPC and the cafe.
+-- This bar only carries the visible cue, your last line, and the input.
 
 local bottom = Instance.new("Frame")
 bottom.Name = "Bottom"
 bottom.AnchorPoint = Vector2.new(0.5, 1)
-bottom.Position = UDim2.new(0.5, 0, 1, -16)
-bottom.Size = UDim2.new(0, 640, 0, 0)
+bottom.Position = UDim2.new(0.5, 0, 1, -12)
+bottom.Size = UDim2.new(0, 700, 0, 0)
 bottom.AutomaticSize = Enum.AutomaticSize.Y
 bottom.BackgroundTransparency = 1
 bottom.Visible = false
 bottom.Parent = gui
-list(bottom, false, 8).HorizontalAlignment = Enum.HorizontalAlignment.Center
+list(bottom, false, 6).HorizontalAlignment = Enum.HorizontalAlignment.Center
 
-local talk = panel(bottom, "Talk")
-talk.Size = UDim2.new(1, 0, 0, 0)
-talk.AutomaticSize = Enum.AutomaticSize.Y
-talk.LayoutOrder = 1
-pad(talk, 14)
-list(talk, false, 6)
+local strip = panel(bottom, "Strip", INK)
+strip.BackgroundTransparency = 0.25
+strip.Size = UDim2.new(1, 0, 0, 0)
+strip.AutomaticSize = Enum.AutomaticSize.Y
+strip.LayoutOrder = 1
+pad(strip, 8)
+list(strip, false, 2)
 
-local customerTitle = para(talk, "", 15, ACCENT, true, 1)
+local customerTitle = para(strip, "", 14, PAPER, false, 1)
 customerTitle.Name = "CustomerTitle"
-local customerCue = para(talk, "", 13, MUTED, false, 2)
-customerCue.Name = "CustomerCue"
-
-local log = Instance.new("ScrollingFrame")
-log.Name = "Log"
-log.Size = UDim2.new(1, 0, 0, 120)
-log.BackgroundTransparency = 1
-log.BorderSizePixel = 0
-log.ScrollBarThickness = 4
-log.AutomaticCanvasSize = Enum.AutomaticSize.Y
-log.CanvasSize = UDim2.new(0, 0, 0, 0)
-log.LayoutOrder = 3
-log.Parent = talk
-list(log, false, 4)
-
-local typing = para(talk, "", 13, MUTED, false, 4)
+customerTitle.RichText = true
+local lastSaid = para(strip, "", 13, Color3.fromRGB(190, 205, 240), false, 2)
+lastSaid.Name = "LastSaid"
+lastSaid.Visible = false
+local typing = para(strip, "", 13, GOLD, false, 3)
 typing.Name = "Typing"
-stockLine = para(talk, "", 12, MUTED, false, 5)
+typing.Visible = false
+stockLine = para(strip, "", 11, Color3.fromRGB(170, 160, 145), false, 4)
 
-local logCount = 0
-local function addLine(speaker: string, text: string, kind: string)
-	logCount += 1
-	local line = para(log, "", 17, INK, false, logCount)
-	line.RichText = true
-	local color = if kind == "player" then "#4E70B4" else "#D67C30"
-	local safe = (text:gsub("&", "&amp;"):gsub("<", "&lt;"))
-	line.Text = string.format('<font color="%s"><b>%s</b></font>  %s', color, speaker, safe)
-	task.defer(function()
-		log.CanvasPosition = Vector2.new(0, math.max(0, log.AbsoluteCanvasSize.Y - log.AbsoluteSize.Y))
-	end)
+-- empty rows collapse so the bar stays one or two lines tall
+local function setLine(line: TextLabel, text: string)
+	line.Text = text
+	line.Visible = text ~= ""
+end
+
+local function escape(text: string): string
+	return (text:gsub("&", "&amp;"):gsub("<", "&lt;"))
 end
 
 local chatRow = Instance.new("Frame")
 chatRow.Name = "ChatRow"
-chatRow.Size = UDim2.new(1, 0, 0, 42)
+chatRow.Size = UDim2.new(1, 0, 0, 40)
 chatRow.BackgroundTransparency = 1
 chatRow.LayoutOrder = 2
 chatRow.Parent = bottom
@@ -345,34 +347,39 @@ hintButton.Activated:Connect(function()
 end)
 
 Remotes.get("Customer").OnClientEvent:Connect(function(visible)
-	clear(log)
-	logCount = 0
-	typing.Text = ""
+	setLine(lastSaid, "")
+	setLine(typing, "")
 	if visible then
 		hasCustomer = true
-		customerTitle.Text = visible.name
-		local article = if string.find("aeiou", string.sub(visible.ageGroup, 1, 1), 1, true) then "An" else "A"
-		customerCue.Text = string.format("%s %s customer, %s.", article, visible.ageGroup, visible.situation)
+		local article = if string.find("aeiou", string.sub(visible.ageGroup, 1, 1), 1, true) then "an" else "a"
+		customerTitle.Text = string.format(
+			'<font color="#E2AC34"><b>%s</b></font>  ·  %s %s customer, %s.',
+			escape(visible.name),
+			article,
+			visible.ageGroup,
+			escape(visible.situation)
+		)
 	else
 		hasCustomer = false
 		customerTitle.Text = "Next customer coming..."
-		customerCue.Text = ""
 	end
 end)
 
 Remotes.get("Dialogue").OnClientEvent:Connect(function(speaker: string, text: string, kind: string?)
-	addLine(speaker, text, kind or "npc")
+	if kind == "player" then
+		setLine(lastSaid, "You: " .. text)
+	end
 end)
 
 Remotes.get("Busy").OnClientEvent:Connect(function(busy: boolean, who: string?)
-	typing.Text = if busy then (who or "They") .. " is thinking..." else ""
+	setLine(typing, if busy then (who or "They") .. " is thinking..." else "")
 end)
 
 -- ---------- coach bubble ----------
 
 local coachBubble = panel(gui, "CoachBubble", COACH)
-coachBubble.AnchorPoint = Vector2.new(1, 1)
-coachBubble.Position = UDim2.new(1, -16, 1, -24)
+coachBubble.AnchorPoint = Vector2.new(1, 0)
+coachBubble.Position = UDim2.new(1, -16, 0, 110)
 coachBubble.Size = UDim2.new(0, 280, 0, 0)
 coachBubble.AutomaticSize = Enum.AutomaticSize.Y
 coachBubble.Visible = false
@@ -407,6 +414,9 @@ local function makeOverlay(name: string): Frame
 	return overlay
 end
 
+-- Returns the container to put rows in. For a scrolling card that is an
+-- inner "Content" frame: AutomaticCanvasSize ignores a ScrollingFrame's own
+-- UIPadding, which used to clip the last debrief line.
 local function card(parent: Instance, name: string, width: number, scrolling: boolean): GuiObject
 	local c: GuiObject
 	if scrolling then
@@ -429,9 +439,20 @@ local function card(parent: Instance, name: string, width: number, scrolling: bo
 	c.ZIndex = 6
 	c.Parent = parent
 	round(c, 16)
-	pad(c, 24)
-	list(c, false, 10)
-	return c
+	local content: GuiObject = c
+	if scrolling then
+		local inner = Instance.new("Frame")
+		inner.Name = "Content"
+		inner.BackgroundTransparency = 1
+		inner.Size = UDim2.new(1, -8, 0, 0) -- leave room for the scrollbar
+		inner.AutomaticSize = Enum.AutomaticSize.Y
+		inner.ZIndex = 6
+		inner.Parent = c
+		content = inner
+	end
+	pad(content, 24)
+	list(content, false, 10)
+	return content
 end
 
 -- Lobby
@@ -571,7 +592,7 @@ Remotes.get("Debrief").OnClientEvent:Connect(function(payload)
 		Remotes.get("Continue"):FireServer()
 	end)
 	setZ(debriefCard)
-	;(debriefCard :: ScrollingFrame).CanvasPosition = Vector2.new(0, 0)
+	;(debriefCard.Parent :: ScrollingFrame).CanvasPosition = Vector2.new(0, 0)
 
 	bigOverlay.Visible = false
 	debriefOverlay.Visible = true
@@ -587,6 +608,22 @@ Remotes.get("Timer").OnClientEvent:Connect(function(seconds: number, kind: strin
 		timeValue.TextColor3 = if seconds <= 20 then BAD else INK
 	end
 end)
+
+-- ---------- camera ----------
+-- During a round the camera is fixed per lane, looking over the counter at
+-- the customer, so the player's own avatar never blocks the conversation.
+
+local function setCamera(cf: CFrame?)
+	local cam = workspace.CurrentCamera
+	if cf then
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CFrame = cf
+		cam.FieldOfView = 60
+	else
+		cam.CameraType = Enum.CameraType.Custom
+		cam.FieldOfView = 70
+	end
+end
 
 -- ---------- phase routing ----------
 
@@ -624,9 +661,11 @@ end
 Remotes.get("Phase").OnClientEvent:Connect(function(phase: string, payload)
 	if phase == "lobby" then
 		hideAll()
+		setCamera(nil)
 		applyLobby(payload)
 		lobbyOverlay.Visible = true
 	elseif phase == "waiting" then
+		setCamera(nil)
 		applyLobby(payload)
 		lobbyOverlay.Visible = false
 		bottom.Visible = false
@@ -637,6 +676,7 @@ Remotes.get("Phase").OnClientEvent:Connect(function(phase: string, payload)
 		waitingBanner.Visible = not debriefOverlay.Visible
 	elseif phase == "countdown" then
 		hideAll()
+		setCamera(payload.camera)
 		hud.Visible = true
 		revenueValue.Text, starsValue.Text, scoreValue.Text = "$0", "–", "0"
 		bigText.Text = "Get ready..."
@@ -644,12 +684,12 @@ Remotes.get("Phase").OnClientEvent:Connect(function(phase: string, payload)
 		bigOverlay.Visible = true
 	elseif phase == "running" then
 		hideAll()
+		setCamera(payload.camera)
 		hud.Visible = true
 		bottom.Visible = true
 		hasCustomer = false
 		customerTitle.Text = "Next customer coming..."
-		customerCue.Text = ""
-		clear(log)
+		setLine(lastSaid, "")
 	elseif phase == "closing" then
 		bottom.Visible = false
 		coachBubble.Visible = false
