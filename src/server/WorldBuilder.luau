@@ -130,7 +130,7 @@ function WorldBuilder.build(menuText: string?)
 		Parent = folder,
 	})
 	local surface = Instance.new("SurfaceGui")
-	surface.Face = Enum.NormalId.Front
+	surface.Face = Enum.NormalId.Back -- +Z face, toward the player at the counter
 	surface.CanvasSize = Vector2.new(480, 280)
 	surface.Parent = board
 	local menuLabel = Instance.new("TextLabel")
@@ -153,7 +153,7 @@ function WorldBuilder.build(menuText: string?)
 		Parent = folder,
 	})
 	local signGui = Instance.new("SurfaceGui")
-	signGui.Face = Enum.NormalId.Back
+	signGui.Face = Enum.NormalId.Front -- -Z face, toward the inside of the cafe
 	signGui.CanvasSize = Vector2.new(400, 120)
 	signGui.Parent = sign
 	local signLabel = Instance.new("TextLabel")

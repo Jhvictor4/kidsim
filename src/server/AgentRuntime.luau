@@ -46,11 +46,13 @@ function AgentRuntime.counterpartReply(
 		"Current world state: " .. stateSummary(pack, state),
 	}, "\n\n")
 
+	-- `history` already ends with the player's latest line (the engine appends
+	-- it before calling us); appending playerText again would send duplicate
+	-- user turns, which strict chat-template endpoints reject.
 	local messages: { LlmClient.ChatMessage } = { { role = "system", content = system } }
 	for _, msg in history do
 		table.insert(messages, msg)
 	end
-	table.insert(messages, { role = "user", content = playerText })
 
 	local ok, reply = LlmClient.chat(messages, { maxTokens = Config.MAX_TOKENS_DIALOGUE, temperature = 0.8 })
 	if ok then
@@ -121,8 +123,41 @@ local function tryParseEvaluation(raw: string): Evaluation?
 	if typeof(data.skills) ~= "table" or typeof(data.realWorldTransfer) ~= "string" or typeof(data.nextDrill) ~= "string" then
 		return nil
 	end
-	data.wentWell = typeof(data.wentWell) == "table" and data.wentWell or {}
-	data.wentWrong = typeof(data.wentWrong) == "table" and data.wentWrong or {}
+
+	-- Coerce element shapes so a legal-JSON-wrong-shape reply can never
+	-- error the client's debrief renderer.
+	local function toStringList(value: any): { string }
+		if typeof(value) ~= "table" then
+			return {}
+		end
+		local list = {}
+		for _, item in value do
+			if typeof(item) == "string" then
+				table.insert(list, item)
+			elseif typeof(item) == "table" then
+				for _, nested in item do
+					if typeof(nested) == "string" then
+						table.insert(list, nested)
+						break
+					end
+				end
+			end
+		end
+		return list
+	end
+	local skills = {}
+	for _, skill in data.skills do
+		if typeof(skill) == "table" then
+			table.insert(skills, {
+				tag = typeof(skill.tag) == "string" and skill.tag or "skill",
+				name = typeof(skill.name) == "string" and skill.name or tostring(skill.tag or "Skill"),
+				evidence = typeof(skill.evidence) == "string" and skill.evidence or "",
+			})
+		end
+	end
+	data.skills = skills
+	data.wentWell = toStringList(data.wentWell)
+	data.wentWrong = toStringList(data.wentWrong)
 	return data :: Evaluation
 end
 

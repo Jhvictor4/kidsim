@@ -235,6 +235,11 @@ local function availableChoices(self: SimEngineInstance, event: PackEvent): { Ch
 			table.insert(choices, choice)
 		end
 	end
+	-- never strand the player with zero buttons (future packs; this pack
+	-- always keeps at least one requirement-free choice per event)
+	if #choices == 0 then
+		return event.choices
+	end
 	return choices
 end
 

@@ -7,7 +7,8 @@
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
-local Remotes = require(game.ReplicatedStorage.Shared.Remotes)
+-- WaitForChild: on a live server the client can run before Shared replicates
+local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Remotes"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")

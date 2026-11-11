@@ -26,17 +26,27 @@ local function runSessionLoop(player: Player)
 		local engine = SimEngine.new(ACTIVE_PACK, player, world)
 		sessions[player] = engine
 		engine:run() -- returns after the player presses "play again" at Debrief
-		sessions[player] = nil
 		if player.Parent ~= Players then
 			break
 		end
 		task.wait(0.5)
 	end
+	sessions[player] = nil
 end
 
-Players.PlayerAdded:Connect(function(player)
+local function startSession(player: Player)
+	if sessions[player] ~= nil then
+		return
+	end
+	sessions[player] = false -- reserve before the engine exists (double-start guard)
 	task.spawn(runSessionLoop, player)
-end)
+end
+
+Players.PlayerAdded:Connect(startSession)
+-- Play Solo can join the player before the connection above exists
+for _, player in Players:GetPlayers() do
+	startSession(player)
+end
 
 Players.PlayerRemoving:Connect(function(player)
 	local engine = sessions[player]
