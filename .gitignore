@@ -14,3 +14,8 @@ src/server/DevSecrets.luau
 
 # Raw demo footage (large)
 demo/footage/*.mp4
+
+# Demo video renders (published on YouTube: https://youtu.be/XVt_CCN-GrY)
+demo/*.mp4
+demo/video/out/
+demo/video/.hyperframes/

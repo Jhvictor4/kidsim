@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #1E1A16; font-family: "Montserrat", sans-serif; }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #1E1A16; }
+      .glow { position: absolute; width: 1200px; height: 1200px; right: -200px; top: 60px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(217,119,43,0.18) 0%, rgba(217,119,43,0) 62%); }
+      .content { position: absolute; inset: 0; box-sizing: border-box; padding: 150px 200px; display: flex; flex-direction: column; justify-content: center; gap: 56px; }
+      .lead { font-family: "Fraunces", serif; font-style: italic; font-size: 64px; color: #F6F1E7; }
+      .chips { display: flex; gap: 32px; }
+      .chip { background: #F6F1E7; color: #211C17; font-size: 64px; font-weight: 800; padding: 34px 52px; border-radius: 28px; letter-spacing: -1px; }
+      .chip.money { background: #D9772B; color: #211C17; }
+      .tail { font-size: 54px; font-weight: 800; color: #F6F1E7; }
+      .tail span { color: #E38A45; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="skills" data-start="0" data-duration="7" data-width="1920" data-height="1080">
+      <div class="glow" id="glow"></div>
+      <div class="content">
+        <div class="lead" id="lead">The skills that matter most —</div>
+        <div class="chips">
+          <div class="chip" id="c1">Saying no.</div>
+          <div class="chip money" id="c2">Handling money.</div>
+          <div class="chip" id="c3">Managing people.</div>
+        </div>
+        <div class="tail" id="tail">kids learn by <span>failing in real life.</span></div>
+      </div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.from("#glow", { opacity: 0, scale: 0.9, duration: 1.0, ease: "sine.out" }, 0.1);
+      tl.to("#glow", { scale: 1.08, x: -60, duration: 5.8, ease: "sine.inOut" }, 1.1);
+      tl.from("#lead", { y: 30, opacity: 0, duration: 0.6, ease: "power3.out" }, 0.2);
+      tl.from("#c1", { y: 50, opacity: 0, duration: 0.5, ease: "expo.out" }, 0.7);
+      tl.from("#c2", { y: 50, opacity: 0, duration: 0.5, ease: "power3.out" }, 0.95);
+      tl.from("#c3", { y: 50, opacity: 0, duration: 0.5, ease: "back.out(1.3)" }, 1.2);
+      tl.from("#tail", { x: -40, opacity: 0, duration: 0.6, ease: "power2.out" }, 2.4);
+      window.__timelines["skills"] = tl;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #1E1A16; font-family: "Montserrat", sans-serif; }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #1E1A16; }
+      .glow { position: absolute; width: 1500px; height: 1500px; left: 210px; top: -250px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(217,119,43,0.2) 0%, rgba(217,119,43,0) 60%); }
+      .content { position: absolute; inset: 0; box-sizing: border-box; padding: 130px 200px; display: flex; flex-direction: column; justify-content: center; gap: 48px; }
+      .h1 { font-size: 104px; font-weight: 800; color: #F6F1E7; letter-spacing: -2px; line-height: 1.02; max-width: 1500px; }
+      .h1 span { color: #E38A45; }
+      .packs { display: flex; gap: 26px; }
+      .pack { font-size: 36px; font-weight: 800; padding: 26px 40px; border-radius: 22px; background: #F6F1E7; color: #211C17; }
+      .pack small { display: block; font-size: 22px; letter-spacing: 2px; color: #B85F1C; margin-bottom: 6px; }
+      .pack.next { background: transparent; color: #C9C0B3; border: 3px solid #4A433B; }
+      .pack.next small { color: #A39A8E; }
+      .foot { display: flex; justify-content: space-between; align-items: baseline; }
+      .brand { font-size: 64px; font-weight: 800; color: #F6F1E7; }
+      .url { font-family: "Fraunces", serif; font-style: italic; font-size: 40px; color: #D8CFC2; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="engine" data-start="0" data-duration="6" data-width="1920" data-height="1080">
+      <div class="glow" id="glow"></div>
+      <div class="content">
+        <div class="h1" id="h1">One engine. <span>Any real-world skill.</span></div>
+        <div class="packs">
+          <div class="pack" id="p1"><small>LIVE</small>Cafe Shift</div>
+          <div class="pack next" id="p2"><small>NEXT</small>Budget Week</div>
+          <div class="pack next" id="p3"><small>NEXT</small>Negotiation</div>
+          <div class="pack next" id="p4"><small>NEXT</small>First Job</div>
+        </div>
+        <div class="foot">
+          <div class="brand" id="brand">KidSim</div>
+          <div class="url" id="url">github.com/Jhvictor4/kidsim</div>
+        </div>
+      </div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.from("#glow", { opacity: 0, scale: 0.88, duration: 1.0, ease: "sine.out" }, 0.1);
+      tl.to("#glow", { scale: 1.05, duration: 4.4, ease: "sine.inOut" }, 1.1);
+      tl.from("#h1", { y: 50, opacity: 0, duration: 0.7, ease: "power3.out" }, 0.2);
+      tl.from("#p1", { y: 40, opacity: 0, duration: 0.5, ease: "expo.out" }, 0.9);
+      tl.from(["#p2", "#p3", "#p4"], { y: 40, opacity: 0, duration: 0.45, ease: "power2.out", stagger: 0.12 }, 1.1);
+      tl.from("#brand", { x: -30, opacity: 0, duration: 0.5, ease: "power3.out" }, 2.2);
+      tl.from("#url", { x: 30, opacity: 0, duration: 0.5, ease: "power2.out" }, 2.4);
+      tl.to("#root", { opacity: 0, duration: 0.6, ease: "power1.in" }, 5.35);
+      window.__timelines["engine"] = tl;
+    </script>
+  </body>
+</html>
