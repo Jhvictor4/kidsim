@@ -91,6 +91,10 @@ local hudLayout = Instance.new("UIListLayout")
 hudLayout.FillDirection = Enum.FillDirection.Horizontal
 hudLayout.Padding = UDim.new(0, 14)
 hudLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+-- Every UIListLayout here sorts by LayoutOrder: the engine default is Name, and
+-- since most children share a class name that silently reorders the UI
+-- (e.g. a TextButton sorts above TextLabels).
+hudLayout.SortOrder = Enum.SortOrder.LayoutOrder
 hudLayout.Parent = hud
 
 type MeterDef = { key: string, label: string, format: string, max: number? }
@@ -115,32 +119,40 @@ local function buildHud()
 		end
 	end
 	meterValueLabels = {}
-	for _, def in meterDefs do
+	for index, def in meterDefs do
 		local chip = Instance.new("Frame")
+		chip.LayoutOrder = index
 		chip.BackgroundTransparency = 1
 		chip.AutomaticSize = Enum.AutomaticSize.XY
 		chip.Parent = hud
 		local chipLayout = Instance.new("UIListLayout")
 		chipLayout.FillDirection = Enum.FillDirection.Vertical
+		chipLayout.SortOrder = Enum.SortOrder.LayoutOrder
 		chipLayout.Parent = chip
 		local title = label(chip, string.upper(def.label), 11, Color3.fromRGB(130, 122, 110), true)
 		title.AutomaticSize = Enum.AutomaticSize.XY
+		title.LayoutOrder = 1
 		local value = label(chip, "-", 20, INK, true)
 		value.AutomaticSize = Enum.AutomaticSize.XY
+		value.LayoutOrder = 2
 		meterValueLabels[def.key] = value
 	end
 	-- inventory chip
 	local invChip = Instance.new("Frame")
+	invChip.LayoutOrder = #meterDefs + 1
 	invChip.BackgroundTransparency = 1
 	invChip.AutomaticSize = Enum.AutomaticSize.XY
 	invChip.Parent = hud
 	local invLayout = Instance.new("UIListLayout")
 	invLayout.FillDirection = Enum.FillDirection.Vertical
+	invLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	invLayout.Parent = invChip
 	local invTitle = label(invChip, "STOCK", 11, Color3.fromRGB(130, 122, 110), true)
 	invTitle.AutomaticSize = Enum.AutomaticSize.XY
+	invTitle.LayoutOrder = 1
 	local invValue = label(invChip, "-", 15, INK, true)
 	invValue.AutomaticSize = Enum.AutomaticSize.XY
+	invValue.LayoutOrder = 2
 	inventoryLabel = invValue
 	hud.Visible = true
 end
@@ -177,10 +189,14 @@ toastArea.Parent = gui
 local toastLayout = Instance.new("UIListLayout")
 toastLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 toastLayout.Padding = UDim.new(0, 4)
+toastLayout.SortOrder = Enum.SortOrder.LayoutOrder
 toastLayout.Parent = toastArea
 
+local toastCount = 0
 Remotes.get("Toast").OnClientEvent:Connect(function(text: string)
+	toastCount += 1
 	local toast = Instance.new("TextLabel")
+	toast.LayoutOrder = toastCount
 	toast.BackgroundColor3 = INK
 	toast.BackgroundTransparency = 0.15
 	toast.TextColor3 = Color3.fromRGB(255, 244, 222)
@@ -212,6 +228,7 @@ local bottomLayout = Instance.new("UIListLayout")
 bottomLayout.FillDirection = Enum.FillDirection.Vertical
 bottomLayout.Padding = UDim.new(0, 8)
 bottomLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+bottomLayout.SortOrder = Enum.SortOrder.LayoutOrder
 bottomLayout.Parent = bottom
 
 -- choices
@@ -225,6 +242,7 @@ local choicesLayout = Instance.new("UIListLayout")
 choicesLayout.FillDirection = Enum.FillDirection.Vertical
 choicesLayout.Padding = UDim.new(0, 6)
 choicesLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+choicesLayout.SortOrder = Enum.SortOrder.LayoutOrder
 choicesLayout.Parent = choicesFrame
 
 -- dialogue panel
@@ -240,11 +258,14 @@ pad(dialogue, 14)
 local dialogueLayout = Instance.new("UIListLayout")
 dialogueLayout.FillDirection = Enum.FillDirection.Vertical
 dialogueLayout.Padding = UDim.new(0, 4)
+dialogueLayout.SortOrder = Enum.SortOrder.LayoutOrder
 dialogueLayout.Parent = dialogue
 
 local speakerLabel = label(dialogue, "", 13, ACCENT, true)
 speakerLabel.Size = UDim2.new(1, 0, 0, 16)
+speakerLabel.LayoutOrder = 1
 local textLabel = label(dialogue, "", 18, INK)
+textLabel.LayoutOrder = 2
 textLabel.Size = UDim2.new(1, 0, 0, 0)
 textLabel.AutomaticSize = Enum.AutomaticSize.Y
 
@@ -257,6 +278,7 @@ chatRow.Parent = bottom
 local chatLayout = Instance.new("UIListLayout")
 chatLayout.FillDirection = Enum.FillDirection.Horizontal
 chatLayout.Padding = UDim.new(0, 8)
+chatLayout.SortOrder = Enum.SortOrder.LayoutOrder
 chatLayout.Parent = chatRow
 
 local chatBox = Instance.new("TextBox")
@@ -268,15 +290,18 @@ chatBox.TextColor3 = INK
 chatBox.PlaceholderText = "Say something to them..."
 chatBox.Text = ""
 chatBox.ClearTextOnFocus = false
+chatBox.LayoutOrder = 1
 chatBox.Parent = chatRow
 round(chatBox, 10)
 pad(chatBox, 6)
 
 local sendButton = button(chatRow, "Reply", INK, PAPER)
 sendButton.Size = UDim2.new(0, 90, 1, 0)
+sendButton.LayoutOrder = 2
 
 local hintButton = button(chatRow, "Coach", COACH, Color3.fromRGB(255, 255, 255))
 hintButton.Size = UDim2.new(0, 90, 1, 0)
+hintButton.LayoutOrder = 3
 
 local function sendChat()
 	local text = chatBox.Text
@@ -308,8 +333,9 @@ Remotes.get("Choices").OnClientEvent:Connect(function(choices)
 			child:Destroy()
 		end
 	end
-	for _, choice in choices do
+	for index, choice in choices do
 		local b = button(choicesFrame, choice.label, Color3.fromRGB(255, 252, 245), INK)
+		b.LayoutOrder = index
 		b.Size = UDim2.new(1, 0, 0, 38)
 		b.TextSize = 15
 		local stroke = Instance.new("UIStroke")
@@ -346,10 +372,13 @@ pad(coachBubble, 12)
 local coachLayout = Instance.new("UIListLayout")
 coachLayout.FillDirection = Enum.FillDirection.Vertical
 coachLayout.Padding = UDim.new(0, 4)
+coachLayout.SortOrder = Enum.SortOrder.LayoutOrder
 coachLayout.Parent = coachBubble
 local coachTitle = label(coachBubble, "COACH", 11, Color3.fromRGB(205, 220, 255), true)
 coachTitle.AutomaticSize = Enum.AutomaticSize.XY
+coachTitle.LayoutOrder = 1
 local coachText = label(coachBubble, "", 15, Color3.fromRGB(255, 255, 255))
+coachText.LayoutOrder = 2
 coachText.Size = UDim2.new(1, 0, 0, 0)
 coachText.AutomaticSize = Enum.AutomaticSize.Y
 
@@ -393,25 +422,31 @@ pad(introCard, 24)
 local introLayout = Instance.new("UIListLayout")
 introLayout.FillDirection = Enum.FillDirection.Vertical
 introLayout.Padding = UDim.new(0, 12)
+introLayout.SortOrder = Enum.SortOrder.LayoutOrder
 introLayout.Parent = introCard
 
 local introKicker = label(introCard, "KIDSIM — ISAAC SIM FOR CHILDREN", 12, ACCENT, true)
 introKicker.ZIndex = 6
+introKicker.LayoutOrder = 1
 introKicker.Size = UDim2.new(1, 0, 0, 14)
 local introTitle = label(introCard, "", 32, INK, true)
 introTitle.ZIndex = 6
+introTitle.LayoutOrder = 2
 introTitle.Size = UDim2.new(1, 0, 0, 0)
 introTitle.AutomaticSize = Enum.AutomaticSize.Y
 local introThesis = label(introCard, "", 18, Color3.fromRGB(100, 92, 80), true)
 introThesis.ZIndex = 6
+introThesis.LayoutOrder = 3
 introThesis.Size = UDim2.new(1, 0, 0, 0)
 introThesis.AutomaticSize = Enum.AutomaticSize.Y
 local introBriefing = label(introCard, "", 16, INK)
 introBriefing.ZIndex = 6
+introBriefing.LayoutOrder = 4
 introBriefing.Size = UDim2.new(1, 0, 0, 0)
 introBriefing.AutomaticSize = Enum.AutomaticSize.Y
 local startButton = button(introCard, "Start my shift", ACCENT, Color3.fromRGB(255, 255, 255))
 startButton.ZIndex = 6
+startButton.LayoutOrder = 5
 startButton.Size = UDim2.new(1, 0, 0, 46)
 startButton.Activated:Connect(function()
 	Remotes.get("Continue"):FireServer()
@@ -443,6 +478,7 @@ pad(debriefCard, 24)
 local debriefLayout = Instance.new("UIListLayout")
 debriefLayout.FillDirection = Enum.FillDirection.Vertical
 debriefLayout.Padding = UDim.new(0, 10)
+debriefLayout.SortOrder = Enum.SortOrder.LayoutOrder
 debriefLayout.Parent = debriefCard
 
 local function clearDebrief()
