@@ -67,6 +67,27 @@ leaderboard compares owners, and the debrief reveals who each staff member reall
 The LLM proposes, the server decides: money, stock, rule breaks and score only change
 through server-side validation, and if a model call fails the round still finishes.
 
+## Memory layer: GBrain
+
+KidSim remembers each owner across rounds with [GBrain](https://github.com/garrytan/gbrain),
+called from the Roblox server over GBrain's MCP HTTP endpoint (`src/server/GBrainClient.luau`,
+JSON-RPC `tools/call` with the memory verbs `remember` and `recall`).
+
+- **What is stored:** one anonymous skill record per owner per round — questions
+  answered/asked, problem staff caught/total, firings with a warning first, rule
+  breaks, average stars, revenue, score. No names, no chat text. The owner key is a
+  salted hash of the Roblox UserId (`kidsim-owner-xxxxxxxx`).
+- **Why:** the next round reads the latest record and (1) shapes the team to probe the
+  weak skill (missed problem staff → two of them plus deal-hunting customers; left
+  questions unanswered → a staff member who asks a lot), (2) gives coach tips, and
+  (3) shows growth in the debrief ("Answering your team: 0/1 last time → 2/2 today").
+- **Config:** the brain's `/mcp` URL in `Config.GBRAIN_URL` or `DevSecrets.GBRAIN_URL`; a
+  GBrain API key (`gbrain auth create <name> --scopes read,write`) in the Creator Hub
+  secret `GBRAIN_TOKEN` or `DevSecrets.GBRAIN_TOKEN`. Not configured or unreachable →
+  the game plays exactly as before, without memory.
+- Verified over two consecutive Studio rounds against a self-hosted GBrain
+  (`gbrain serve --http`); hosted gbrain.io only needs a different URL and key.
+
 ## Run it in Studio
 
 Prereqs: [Roblox Studio](https://create.roblox.com/), [Rojo](https://rojo.space/)

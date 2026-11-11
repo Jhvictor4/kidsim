@@ -79,6 +79,7 @@ local pack: Pack = {
 		sensitivities = {
 			{
 				label = "bargain-hunter",
+				pressure = true,
 				prompt = "You always ask for a discount first (try for 30-50% off) and push a bit. You still pay full price if the staff member politely holds firm and the offer fits your need.",
 			},
 			{
@@ -106,21 +107,25 @@ local pack: Pack = {
 			{
 				label = "Pushover",
 				weight = 2,
+				problem = true,
 				prompt = "You hate saying no. When a customer asks for a discount you usually give it, often bigger than the owner allows, and you rarely bother asking the owner first.",
 			},
 			{
 				label = "Pushy seller",
 				weight = 2,
+				problem = true,
 				prompt = "You care only about selling more. You keep pushing extra items even after the customer says no, and you exaggerate how good things are.",
 			},
 			{
 				label = "Grumpy",
 				weight = 1,
+				problem = true,
 				prompt = "You are impatient and short with customers, especially ones who can't decide or ask for deals. You follow the price rules but you sound annoyed.",
 			},
 			{
 				label = "Worrier",
 				weight = 1,
+				asksOften = true,
 				prompt = "You are kind but unsure of yourself. You ask the owner about almost every small decision, even ones the rules already cover.",
 			},
 		},

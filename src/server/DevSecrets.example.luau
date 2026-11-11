@@ -12,4 +12,8 @@ return {
 	-- Optional overrides (leave nil to use Config defaults)
 	BASE_URL = nil :: string?, -- e.g. "https://api.openai.com/v1"
 	MODEL = nil :: string?, -- e.g. "gpt-4o-mini"
+
+	-- Memory layer (GBrain). Leave empty to play without memory.
+	GBRAIN_URL = "", -- the brain's MCP URL, e.g. "https://<your-brain-host>/mcp"
+	GBRAIN_TOKEN = "", -- a GBrain API key with read,write scopes
 }

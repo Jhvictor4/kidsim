@@ -723,6 +723,51 @@ Remotes.get("Debrief").OnClientEvent:Connect(function(payload)
 			)
 		end
 
+		-- growth since last round (remembered by GBrain)
+		local growth = payload.growth
+		if growth and growth.memoryOn then
+			line("SINCE LAST ROUND — remembered by GBrain", 12, ACCENT, true)
+			local now, before = growth.current or {}, growth.previous
+			local function frac(won: number?, total: number?): string
+				if not total or total == 0 then
+					return "–"
+				end
+				return string.format("%d/%d", won or 0, total)
+			end
+			local function trend(a: number?, b: number?, c: number?, d: number?): string
+				if not b or b == 0 or not d or d == 0 then
+					return ""
+				end
+				local was, is = (a or 0) / b, (c or 0) / d
+				return if is > was + 0.001 then "  ▲" elseif is < was - 0.001 then "  ▼" else "  ="
+			end
+			local rows = {
+				{ "Answering your team", "answered", "asked" },
+				{ "Spotting problem staff", "caught", "problemTotal" },
+				{ "Warning before firing", "firedAfterWarning", "fired" },
+			}
+			if before then
+				for _, r in rows do
+					local a, b, c, d = before[r[2]], before[r[3]], now[r[2]], now[r[3]]
+					line(string.format("%s:  %s last time  →  %s today%s", r[1], frac(a, b), frac(c, d), trend(a, b, c, d)), 15, INK, true)
+				end
+				line(
+					string.format("Customer happiness:  %.1f★ → %.1f★   ·   Score:  %d → %d", before.avgStars or 0, now.avgStars or 0, before.score or 0, now.score or 0),
+					15,
+					INK,
+					true
+				)
+			else
+				for _, r in rows do
+					line(string.format("%s:  %s today", r[1], frac(now[r[2]], now[r[3]])), 15, INK, true)
+				end
+				line("First round on record — next time you'll see how you've grown.", 13, SOFT, false)
+			end
+			if not growth.saved then
+				line("(Couldn't reach the memory server this time — this round wasn't saved.)", 12, MUTED, false)
+			end
+		end
+
 		local evaluation = payload.evaluation or {}
 		line("SKILLS YOU PRACTICED", 12, MUTED, true)
 		for _, skill in (evaluation.skills or {}) do

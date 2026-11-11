@@ -115,6 +115,8 @@ export type ShopEngineInstance = typeof(setmetatable(
 		ownerEvents: { OwnerEvent },
 		questions: { Question },
 		nextQuestionId: number,
+		history: { [string]: any }?, -- last round's memory record (GBrain), if any
+		focus: { [string]: boolean }, -- skills this round probes, from memory
 		_connections: { RBXScriptConnection },
 		_running: boolean,
 	},
@@ -158,6 +160,8 @@ function ShopEngine.new(pack: Pack, owner: Player, shop: ShopHooks, startedAt: n
 		ownerEvents = {},
 		questions = {},
 		nextQuestionId = 0,
+		history = nil,
+		focus = {},
 		_connections = {},
 		_running = false,
 	}, ShopEngine)
@@ -314,19 +318,151 @@ function ShopEngine.hire(self: ShopEngineInstance, counter: number, avoidLabels:
 	self:sendState()
 end
 
+-- ---------- memory (GBrain) ----------
+
+local function ratio(won: number, total: number): number?
+	if total <= 0 then
+		return nil
+	end
+	return won / total
+end
+
+-- Decide what this round should probe, from last round's record.
+function ShopEngine.applyHistory(self: ShopEngineInstance, history: { [string]: any }?)
+	self.history = history
+	self.focus = {}
+	if not history then
+		return
+	end
+	local answering = ratio(history.answered or 0, history.asked or 0)
+	if answering and answering < 0.7 then
+		self.focus.answering = true
+	end
+	local spotting = ratio(history.caught or 0, history.problemTotal or 0)
+	if spotting and spotting < 0.7 then
+		self.focus.spotting = true
+	end
+	if (history.fired or 0) > 0 and (history.firedAfterWarning or 0) < (history.fired or 0) then
+		self.focus.fairness = true
+	end
+end
+
+-- Coach tips at the start of a round, from memory. Empty without history.
+function ShopEngine.memoryTips(self: ShopEngineInstance): { string }
+	local h = self.history
+	if not h then
+		return {}
+	end
+	local tips = {}
+	if self.focus.answering then
+		table.insert(tips, string.format("Coach: last round you answered %d of %d staff questions. Watch your throne today!", h.answered or 0, h.asked or 0))
+	end
+	if self.focus.spotting then
+		table.insert(tips, string.format("Coach: last round you caught %d of %d problem staff. Watch the ⚠ marks and unhappy customers.", h.caught or 0, h.problemTotal or 0))
+	end
+	if self.focus.fairness then
+		table.insert(tips, "Coach: last round you fired someone without a warning first. Try warning before firing.")
+	end
+	if #tips == 0 then
+		table.insert(tips, string.format("Coach: welcome back! Last round you scored %d. Can you beat it?", h.score or 0))
+	end
+	return tips
+end
+
+-- The anonymous skill record GBrain keeps for this owner (no names, no chat).
+function ShopEngine.memoryRecord(self: ShopEngineInstance): { [string]: any }
+	local answered, unanswered = 0, 0
+	for _, e in self.ownerEvents do
+		if e.kind == "answer" then
+			answered += 1
+		elseif e.kind == "unanswered" then
+			unanswered += 1
+		end
+	end
+	local problemTotal, caught, fired, firedAfterWarning, unfairFires, ruleBreaks = 0, 0, 0, 0, 0, 0
+	for _, rec in self.allStaff do
+		local problem = rec.profile.personality.problem == true
+		ruleBreaks += rec.ruleBreaks
+		if problem then
+			problemTotal += 1
+			if rec.warned > 0 or rec.fired then
+				caught += 1
+			end
+		end
+		if rec.fired then
+			fired += 1
+			if rec.warned > 0 then
+				firedAfterWarning += 1
+			end
+			if not problem then
+				unfairFires += 1
+			end
+		end
+	end
+	local stats = self:stats()
+	return {
+		v = 1,
+		at = DateTime.now():ToIsoDate(),
+		asked = answered + unanswered,
+		answered = answered,
+		problemTotal = problemTotal,
+		caught = caught,
+		fired = fired,
+		firedAfterWarning = firedAfterWarning,
+		unfairFires = unfairFires,
+		ruleBreaks = ruleBreaks,
+		avgStars = math.floor(stats.avgStars * 10 + 0.5) / 10,
+		revenue = stats.revenue,
+		score = stats.score,
+	}
+end
+
 -- First team: three different personalities, and never three "Stars".
+-- Memory shapes it: missed problem staff last time -> two of them today;
+-- left questions unanswered -> include someone who asks a lot.
 function ShopEngine.hireFirstTeam(self: ShopEngineInstance)
+	local problemLabels, askerLabels, otherLabels = {}, {}, {}
+	for _, p in self.pack.staff.personalities do
+		if p.problem then
+			table.insert(problemLabels, p.label)
+		elseif p.asksOften then
+			table.insert(askerLabels, p.label)
+		else
+			table.insert(otherLabels, p.label)
+		end
+	end
+	local wantProblem = if self.focus.spotting then 2 else 1
+	local wantAsker = self.focus.answering and #askerLabels > 0
+
 	local used: { [string]: boolean } = {}
+	local problemsHired = 0
 	for i = 1, #self.slots do
 		local avoid = table.clone(used)
-		if i == #self.slots and not used["Pushover"] and not used["Pushy seller"] and not used["Grumpy"] then
-			avoid["Star"] = true
-			avoid["Worrier"] = true
+		local slotsLeft = #self.slots - i + 1
+		local problemsNeeded = wantProblem - problemsHired
+		local mustAsker = wantAsker and not used[askerLabels[1] or ""] and i == 1
+		if mustAsker then
+			-- only the asker may be picked for this slot
+			for _, p in self.pack.staff.personalities do
+				if not p.asksOften then
+					avoid[p.label] = true
+				end
+			end
+		elseif problemsNeeded >= slotsLeft then
+			for _, label in askerLabels do
+				avoid[label] = true
+			end
+			for _, label in otherLabels do
+				avoid[label] = true
+			end
 		end
 		self:hire(i, avoid, false)
 		local rec = self.slots[i].staff
 		if rec then
 			used[rec.profile.personality.label] = true
+			if rec.profile.personality.problem then
+				problemsHired += 1
+			end
 		end
 	end
 end
@@ -552,7 +688,7 @@ function ShopEngine.serveCustomer(self: ShopEngineInstance, counter: number, rec
 		return self:isLive() and not slot.fireRequested
 	end
 
-	local profile = CustomerGen.customer(self.pack, self.rng, self:buzz())
+	local profile = CustomerGen.customer(self.pack, self.rng, self:buzz(), self.focus.spotting)
 	hooks.spawnCustomer(profile)
 	rec.status = "serving " .. profile.name
 	self:sendState()
@@ -806,6 +942,7 @@ function ShopEngine.record(self: ShopEngineInstance): { [string]: any }
 	end
 	local stats = self:stats()
 	return {
+		previousRound = self.history, -- from GBrain; nil on a first round
 		finalRules = rules,
 		ownerActions = self.ownerEvents,
 		staff = staff,

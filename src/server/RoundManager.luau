@@ -11,6 +11,7 @@ local Types = require(game.ReplicatedStorage.Shared.Types)
 local Remotes = require(game.ReplicatedStorage.Shared.Remotes)
 local ShopEngine = require(script.Parent.ShopEngine)
 local AgentRuntime = require(script.Parent.AgentRuntime)
+local GBrainClient = require(script.Parent.GBrainClient)
 local Config = require(script.Parent.Config)
 
 type Pack = Types.Pack
@@ -180,7 +181,19 @@ function RoundManager.start(pack: Pack, world: World)
 				local record = engine:record()
 				record.rank = rankOf[player.UserId]
 				record.players = #finalBoard
+				local memory = engine:memoryRecord()
+				-- save to GBrain in parallel with the evaluation
+				local saved: boolean? = nil
+				if GBrainClient.isConfigured() then
+					task.spawn(function()
+						saved = GBrainClient.rememberRound(GBrainClient.ownerEntity(player.UserId), memory)
+					end)
+				end
 				local evaluation = AgentRuntime.evaluate(pack, record)
+				local waited = os.clock()
+				while saved == nil and GBrainClient.isConfigured() and os.clock() - waited < 5 do
+					task.wait(0.1)
+				end
 				if player.Parent == Players then
 					Remotes.get("Debrief"):FireClient(player, {
 						leaderboard = finalBoard,
@@ -191,6 +204,12 @@ function RoundManager.start(pack: Pack, world: World)
 						evaluation = evaluation,
 						thesis = pack.thesis,
 						title = pack.title,
+						growth = {
+							memoryOn = GBrainClient.isConfigured(),
+							saved = saved == true,
+							previous = engine.history,
+							current = memory,
+						},
 					})
 				end
 				engine:cleanup()
@@ -217,12 +236,33 @@ function RoundManager.start(pack: Pack, world: World)
 		end
 		phase = "countdown"
 		engines = {}
+		-- read each owner's last round from GBrain (bounded wait; nil = no memory)
+		local histories: { [Player]: { [string]: any } } = {}
+		if GBrainClient.isConfigured() then
+			local pendingReads = 0
+			for _, player in shopOwner do
+				pendingReads += 1
+				task.spawn(function()
+					local h = GBrainClient.lastRound(GBrainClient.ownerEntity(player.UserId))
+					if h then
+						histories[player] = h
+					end
+					pendingReads -= 1
+				end)
+			end
+			local waitedSince = os.clock()
+			while pendingReads > 0 and os.clock() - waitedSince < Config.MEMORY_READ_SECONDS do
+				task.wait(0.1)
+			end
+		end
+
 		local startedAt = os.clock() + Config.COUNTDOWN_SECONDS
 		endsAt = startedAt + Config.ROUND_SECONDS
 		for index, player in shopOwner do
 			task.spawn(seatOwner, player)
 			local engine = ShopEngine.new(pack, player, world.shops[index], startedAt, endsAt, broadcastLeaderboard)
 			engines[player] = engine
+			engine:applyHistory(histories[player])
 			engine:hireFirstTeam() -- staff walk in during the countdown
 		end
 		sendPhaseAll()
@@ -237,6 +277,13 @@ function RoundManager.start(pack: Pack, world: World)
 		for _, engine in engines do
 			task.spawn(function()
 				engine:run()
+			end)
+			task.delay(2, function()
+				for i, tip in engine:memoryTips() do
+					task.delay((i - 1) * 4, function()
+						engine:toast(tip, "warn")
+					end)
+				end
 			end)
 		end
 		while os.clock() < endsAt do

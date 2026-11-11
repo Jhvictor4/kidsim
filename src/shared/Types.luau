@@ -28,6 +28,7 @@ export type AgeGroup = {
 export type Sensitivity = {
 	label: string,
 	prompt: string, -- how this customer feels about prices and upsells
+	pressure: boolean?, -- pushes staff toward rule breaks (used to probe a weak skill)
 }
 
 export type CustomerSpec = {
@@ -60,6 +61,8 @@ export type Personality = {
 	label: string, -- "Star", "Pushover", ...
 	prompt: string, -- how this staff member really behaves
 	weight: number,
+	problem: boolean?, -- a good owner should notice and warn/fire this one
+	asksOften: boolean?, -- walks to the throne a lot (trains answering your team)
 }
 
 export type StaffSpec = {

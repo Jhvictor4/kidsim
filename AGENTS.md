@@ -61,6 +61,7 @@ Lobby ("Open the cafe" — 누구나 눌러서 서버 전원 시작)
 | `server/ShopEngine.luau` | 사장 1명 × 라운드 1회: 카운터 루프 3개, 질문 큐, 칭찬/경고/해고/채용, 판매 검증, 규칙 위반, 기록 |
 | `server/CustomerGen.luau` | 랜덤 손님/직원 생성 + 각자 TTS 목소리(VoiceId/Pitch/Speed) |
 | `server/AgentRuntime.luau` | 손님/직원/평가자 프롬프트 + JSON 파싱 |
+| `server/GBrainClient.luau` | GBrain 메모리 레이어: 라운드 기록 `remember`, 다음 라운드 `recall` (익명 owner 키, 실패 시 메모리 없이 진행) |
 | `server/LlmClient.luau` | OpenAI 호환 호출, `jsonMode`(400이면 자동 해제) |
 | `server/Config.luau` | 라운드, 직원 수, 채용비, 질문 대기시간, 점수 가중치, 입소문, TTS 목소리 목록 |
 | `server/Packs/CafeShift.luau` | 메뉴 6종, 재고, 손님 범위, 직원 성격 5종, 규칙 3종×3옵션, 프롬프트 |
@@ -80,6 +81,10 @@ C→S `StartRound, Continue, SetPolicy, Answer, StaffAction`.
 - TTS: Studio Play 클라이언트에서 `AudioTextToSpeech:LoadAsync()` → `Success` 확인. 실제 소리는
   MCP로는 들을 수 없어 미확인(사람이 Studio에서 들어봐야 함).
 - **2인 멀티플레이는 아직 실제 검증 안 됨**(MCP는 1인 Play만). Test → Clients and Servers로 확인 필요.
+
+- GBrain 메모리: 로컬 self-host(`gbrain serve --http`, scratch GBRAIN_HOME)로 2연속 라운드 검증 —
+  "Answering your team 0/1 → 2/2", "Spotting problem staff 0/2 → 2/2", 2라운드 팀 구성이 기록에 맞게 바뀜.
+  호스팅(gbrain.io)은 URL+API 키만 바꾸면 됨(아직 미설정). 스크린샷 `demo/gbrain-growth-debrief.jpg`.
 
 ## 6. 알려진 공백 / 다음 과제 (퀄리티 컨트롤)
 

@@ -38,6 +38,14 @@ return {
 	BUZZ_MIN = 0.7,
 	BUZZ_MAX = 1.3,
 
+	-- Memory layer: GBrain (see GBrainClient). URL may be set here once hosted
+	-- (it is not a secret); the API key lives only in the Creator Hub secret
+	-- below or in the gitignored DevSecrets.luau.
+	GBRAIN_URL = "",
+	GBRAIN_SECRET_NAME = "GBRAIN_TOKEN",
+	GBRAIN_ENTITY_SALT = "kidsim-v1",
+	MEMORY_READ_SECONDS = 4, -- how long round start waits for the last record
+
 	-- Text-to-speech voices (AudioTextToSpeech.VoiceId), English only so the
 	-- spoken line matches the bubble.
 	TTS_VOICES = { "1", "2", "3", "4", "5", "6", "7", "8" },

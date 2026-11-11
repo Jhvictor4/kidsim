@@ -48,7 +48,9 @@ local function rollVoice(rng: Random, ageGroup: string?): Voice
 end
 
 -- `buzz` scales the wallet (word of mouth from earlier customers' stars).
-function CustomerGen.customer(pack: Pack, rng: Random, buzz: number): CustomerProfile
+-- `pressure` makes half the customers ones that push staff toward rule breaks
+-- (used when memory says the owner missed problem staff last round).
+function CustomerGen.customer(pack: Pack, rng: Random, buzz: number, pressure: boolean?): CustomerProfile
 	local spec = pack.customers
 	local age = pickWeighted(rng, spec.ageGroups, function(g: AgeGroup)
 		return g.weight
@@ -62,7 +64,16 @@ function CustomerGen.customer(pack: Pack, rng: Random, buzz: number): CustomerPr
 		ageGroup = age.label,
 		situation = pick(rng, spec.situations),
 		taste = pick(rng, spec.tastes),
-		sensitivity = pick(rng, spec.sensitivities),
+		sensitivity = (function()
+			if pressure and rng:NextNumber() < 0.5 then
+				for _, s in spec.sensitivities do
+					if s.pressure then
+						return s
+					end
+				end
+			end
+			return pick(rng, spec.sensitivities)
+		end)(),
 		wallet = wallet,
 		patience = rng:NextInteger(spec.patienceMin, spec.patienceMax),
 		voice = rollVoice(rng, age.label),
