@@ -8,3 +8,6 @@ src/server/DevSecrets.luau
 *.rbxl.lock
 
 .DS_Store
+
+# Prebuilt, key-free bundle (built without DevSecrets.luau)
+!dist/kidsim.rbxlx

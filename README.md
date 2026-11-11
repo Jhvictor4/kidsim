@@ -68,6 +68,11 @@ rojo build -o kidsim.rbxlx     # or: rojo serve + the Rojo Studio plugin
 open kidsim.rbxlx
 ```
 
+No Rojo? Open the prebuilt bundle `dist/kidsim.rbxlx` (File → Open from File) instead.
+It is built from `main` **without** `DevSecrets.luau`, so it holds no API key —
+you still do step 3 below. Rebuild it after changing `src/`:
+`mv src/server/DevSecrets.luau /tmp/ && rojo build -o dist/kidsim.rbxlx && mv /tmp/DevSecrets.luau src/server/`.
+
 Then in Studio (one-time, see `SETUP.md` for details):
 
 1. **Publish** the experience (File → Publish). HttpService needs a published place.

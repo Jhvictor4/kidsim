@@ -1,0 +1,2727 @@
+<roblox version="4">
+  <Item class="ReplicatedStorage" referent="0">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="1">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="2">
+        <Properties>
+          <string name="Name">Remotes</string>
+          <string name="Source"><![CDATA[--!strict
+-- Shared remote registry. The server creates every remote up front;
+-- the client waits for them. One folder, flat names.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local FOLDER_NAME = "KidSimRemotes"
+
+-- server -> client: Phase, State, Customer, Dialogue, CoachHint, Debrief,
+--                   Toast, Busy, Leaderboard, Timer
+-- client -> server: Say, RequestHint, StartRound, Continue
+local NAMES = {
+	"Phase", "State", "Customer", "Dialogue", "CoachHint", "Debrief", "Toast", "Busy", "Leaderboard", "Timer",
+	"Say", "RequestHint", "StartRound", "Continue",
+}
+
+local Remotes = {}
+
+local function getFolder(): Folder
+	if RunService:IsServer() then
+		local folder = ReplicatedStorage:FindFirstChild(FOLDER_NAME) :: Folder?
+		if not folder then
+			folder = Instance.new("Folder")
+			assert(folder, "folder")
+			folder.Name = FOLDER_NAME
+			folder.Parent = ReplicatedStorage
+		end
+		return folder :: Folder
+	end
+	return ReplicatedStorage:WaitForChild(FOLDER_NAME) :: Folder
+end
+
+function Remotes.get(name: string): RemoteEvent
+	local folder = getFolder()
+	if RunService:IsServer() then
+		local remote = folder:FindFirstChild(name) :: RemoteEvent?
+		if not remote then
+			remote = Instance.new("RemoteEvent")
+			assert(remote, "remote")
+			remote.Name = name
+			remote.Parent = folder
+		end
+		return remote :: RemoteEvent
+	end
+	return folder:WaitForChild(name) :: RemoteEvent
+end
+
+-- Server-side bootstrap so the client never races folder creation.
+function Remotes.init()
+	for _, name in NAMES do
+		Remotes.get(name)
+	end
+end
+
+return Remotes
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">Types</string>
+          <string name="Source"><![CDATA[--!strict
+-- Scenario pack contract. The engine knows ONLY these shapes — nothing
+-- cafe-specific. A pack supplies a menu, a stock, rules for generating
+-- random customers, and the persona prompts. Every customer is an agent:
+-- the child talks, the customer decides what to buy and how happy it is.
+
+export type MenuItem = {
+	key: string, -- stock key, e.g. "coffee"
+	label: string, -- what the HUD / menu board prints
+	price: number, -- menu price in whole dollars
+}
+
+export type AgeGroup = {
+	label: string, -- "kid", "teen", "adult", "senior"
+	budgetMin: number,
+	budgetMax: number,
+	weight: number, -- relative spawn weight
+}
+
+export type Sensitivity = {
+	label: string, -- shown nowhere; prompt flavour only
+	prompt: string, -- how this customer feels about prices and upsells
+}
+
+export type CustomerSpec = {
+	names: { string },
+	looks: { string }, -- colour names the world builder understands
+	ageGroups: { AgeGroup },
+	situations: { string }, -- the visible cue the shopkeeper can read
+	tastes: { string }, -- hidden: what actually tempts them
+	sensitivities: { Sensitivity },
+	patienceMin: number, -- how many player lines before they must decide
+	patienceMax: number,
+}
+
+-- One generated customer. `wallet`, `taste`, `sensitivity` are hidden from
+-- the client; the server only ever sends the visible slice.
+export type CustomerProfile = {
+	id: number,
+	name: string,
+	look: string,
+	ageGroup: string,
+	situation: string,
+	taste: string,
+	sensitivity: Sensitivity,
+	wallet: number,
+	patience: number,
+}
+
+export type Pack = {
+	id: string,
+	title: string,
+	thesis: string, -- the one-line product thesis shown in the lobby
+	briefing: string, -- what the player is about to do
+	skillTags: { string },
+	menu: { MenuItem },
+	initialStock: { [string]: number }, -- per player, per round
+	customers: CustomerSpec,
+	cast: {
+		customerBase: string, -- guardrails shared by every customer
+		coach: string,
+		evaluator: string,
+	},
+	debriefTemplate: string, -- evaluator guidance for sim-to-real transfer
+}
+
+-- What a customer agent decided this turn (after server validation).
+export type CustomerTurn = {
+	say: string,
+	decision: string, -- "stay" | "buy" | "leave"
+	items: { [string]: number },
+	pay: number,
+	stars: number, -- 1..5, only meaningful on buy/leave
+}
+
+export type SaleRecord = {
+	customer: string,
+	ageGroup: string,
+	situation: string,
+	taste: string,
+	sensitivity: string,
+	wallet: number,
+	playerSaid: { string },
+	outcome: string, -- "bought" | "left" | "timeout"
+	items: { [string]: number },
+	paid: number,
+	menuValue: number, -- menu price of what they took
+	stars: number,
+}
+
+export type Evaluation = {
+	skills: { { tag: string, name: string, evidence: string } },
+	wentWell: { string },
+	wentWrong: { string },
+	realWorldTransfer: string,
+	nextDrill: string,
+}
+
+export type LeaderboardRow = {
+	userId: number,
+	name: string,
+	lane: number,
+	revenue: number,
+	avgStars: number,
+	served: number,
+	score: number,
+}
+
+return {}
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="4">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Folder" referent="5">
+      <Properties>
+        <string name="Name">KidSim</string>
+      </Properties>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">AgentRuntime</string>
+          <string name="Source"><![CDATA[--!strict
+-- The three personas: customer (a generated agent that decides what to buy
+-- and how happy it is), coach (one hint, never the answer), evaluator
+-- (structured debrief JSON). All prompt text comes from the pack — this
+-- module stays pack-agnostic. Everything the customer "decides" is only a
+-- proposal: LaneEngine validates it against menu, stock and wallet.
+
+local HttpService = game:GetService("HttpService")
+
+local LlmClient = require(script.Parent.LlmClient)
+local Config = require(script.Parent.Config)
+local Types = require(game.ReplicatedStorage.Shared.Types)
+
+type Pack = Types.Pack
+type CustomerProfile = Types.CustomerProfile
+type CustomerTurn = Types.CustomerTurn
+type SaleRecord = Types.SaleRecord
+type Evaluation = Types.Evaluation
+
+local AgentRuntime = {}
+
+-- ---------- shared helpers ----------
+
+local function menuText(pack: Pack): string
+	local lines = {}
+	for _, item in pack.menu do
+		table.insert(lines, string.format("%s (key \"%s\"): $%d", item.label, item.key, item.price))
+	end
+	return table.concat(lines, "; ")
+end
+
+-- Grab the outermost {...} from a model reply and decode it.
+local function decodeObject(raw: string): { [string]: any }?
+	local cleaned = raw:gsub("```json", ""):gsub("```", "")
+	local first = cleaned:find("{")
+	local last = cleaned:match(".*()}")
+	if not first or not last then
+		return nil
+	end
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(cleaned:sub(first :: number, last :: number))
+	end)
+	if ok and typeof(data) == "table" then
+		return data
+	end
+	return nil
+end
+
+local function clip(text: string, limit: number): string
+	if #text > limit then
+		return string.sub(text, 1, limit - 3) .. "..."
+	end
+	return text
+end
+
+-- ========== Customer ==========
+
+-- The stage direction that makes the customer speak first. LaneEngine seeds
+-- the conversation history with it so later turns start with a user message
+-- (some chat templates reject an assistant-first history).
+AgentRuntime.OPENING_PROMPT =
+	"(You just walked up to the counter. Greet the shopkeeper and say roughly what you're in the mood for, in character. decision must be \"stay\".)"
+
+local CUSTOMER_SCHEMA = [[Every reply must be ONLY a JSON object, no prose around it:
+{"say": "what you say out loud (1-2 short sentences)",
+ "decision": "stay" | "buy" | "leave",
+ "items": {"menu_key": quantity, ...},
+ "pay": total dollars you hand over,
+ "stars": 1-5}
+- "stay": keep talking. items/pay/stars are ignored.
+- "buy": you take exactly "items" and pay "pay", then you leave. "say" is your goodbye line.
+  "items" must list EVERY item you take, with the exact menu keys (e.g. {"hotchoc": 1, "cookie": 1}).
+  "pay" is the total you agreed on (a discount the shopkeeper offered counts).
+- "leave": you walk away without buying. "say" is your goodbye line.
+- "stars" (on buy or leave): how you'd rate this shopkeeper to a friend. 5 = felt understood and well treated, 3 = fine, 1 = pushed, tricked or ignored.]]
+
+local function customerSystem(pack: Pack, profile: CustomerProfile, repliesLeft: number): string
+	local lastCall = ""
+	if repliesLeft <= 0 then
+		lastCall = "This is your LAST reply: decision MUST be \"buy\" or \"leave\" now."
+	else
+		lastCall = string.format(
+			"You will listen to the shopkeeper for at most %d more replies before you decide. You may buy earlier if you're happy.",
+			repliesLeft
+		)
+	end
+	return table.concat({
+		pack.cast.customerBase,
+		string.format("You are %s, a %s customer. Right now you are %s.", profile.name, profile.ageGroup, profile.situation),
+		"What actually tempts you (keep it private unless asked about what you like): " .. profile.taste .. ".",
+		"How you feel about money and selling: " .. profile.sensitivity.prompt,
+		string.format(
+			"You have exactly $%d in your wallet. This is private: don't announce it, but you may hint ('I don't have much on me') or tell if asked kindly. You can NEVER spend more than $%d.",
+			profile.wallet,
+			profile.wallet
+		),
+		"Menu: " .. menuText(pack) .. ".",
+		"Prices: you never pay MORE than the menu price for what you take. You may accept a fair discount the shopkeeper offers. If they try to overcharge, lie, or keep pushing after you said no, you get annoyed and may leave with low stars.",
+		"You are persuadable by good selling: if the shopkeeper asks what you need and suggests something that really fits your situation and taste, you are happy to buy it (and maybe one more thing), as long as it fits your wallet.",
+		lastCall,
+		CUSTOMER_SCHEMA,
+	}, "\n\n")
+end
+
+local function parseCustomer(raw: string): CustomerTurn
+	local data = decodeObject(raw)
+	if not data then
+		-- the model answered in plain text: treat it as a line of dialogue
+		local text = raw:gsub("^%s+", ""):gsub("%s+$", "")
+		return { say = clip(text, 280), decision = "stay", items = {}, pay = 0, stars = 3 }
+	end
+	local items: { [string]: number } = {}
+	if typeof(data.items) == "table" then
+		for key, qty in data.items do
+			local n = tonumber(qty)
+			if typeof(key) == "string" and n and n > 0 then
+				items[key] = math.floor(n)
+			end
+		end
+	end
+	local decision = typeof(data.decision) == "string" and string.lower(data.decision) or "stay"
+	if decision ~= "buy" and decision ~= "leave" then
+		decision = "stay"
+	end
+	return {
+		say = clip(typeof(data.say) == "string" and data.say or "...", 280),
+		decision = decision,
+		items = items,
+		pay = tonumber(data.pay) or -1, -- -1 = "menu price"
+		stars = math.clamp(math.floor(tonumber(data.stars) or 3), 1, 5),
+	}
+end
+
+-- `history` holds prior turns: user = shopkeeper lines, assistant = the
+-- customer's raw JSON replies. Pass an empty history for the opening line.
+function AgentRuntime.customerTurn(
+	pack: Pack,
+	profile: CustomerProfile,
+	history: { LlmClient.ChatMessage },
+	repliesLeft: number
+): (boolean, CustomerTurn, string)
+	local messages: { LlmClient.ChatMessage } = {
+		{ role = "system", content = customerSystem(pack, profile, repliesLeft) },
+	}
+	if #history == 0 then
+		table.insert(messages, { role = "user", content = AgentRuntime.OPENING_PROMPT })
+	else
+		for _, msg in history do
+			table.insert(messages, msg)
+		end
+	end
+
+	local ok, reply = LlmClient.chat(messages, {
+		maxTokens = Config.MAX_TOKENS_CUSTOMER,
+		temperature = 0.8,
+		jsonMode = true,
+	})
+	if ok then
+		local turn = parseCustomer(reply)
+		if #history == 0 then
+			turn.decision = "stay"
+		end
+		return true, turn, reply
+	end
+	-- model unreachable: keep the scene alive, let patience run out naturally
+	local fallback: CustomerTurn = {
+		say = if #history == 0 then "Hi! Hmm, what's good here today?" else "Hmm, let me think about that...",
+		decision = if repliesLeft <= 0 then "leave" else "stay",
+		items = {},
+		pay = 0,
+		stars = 3,
+	}
+	return false, fallback, HttpService:JSONEncode(fallback)
+end
+
+-- ========== Coach ==========
+
+function AgentRuntime.coachHint(pack: Pack, profile: CustomerProfile, transcript: { string }): string
+	local system = table.concat({
+		pack.cast.coach,
+		string.format("Customer the kid can see: %s, a %s, %s.", profile.name, profile.ageGroup, profile.situation),
+		"Menu: " .. menuText(pack) .. ".",
+		"Conversation so far:\n" .. (if #transcript > 0 then table.concat(transcript, "\n") else "(nothing yet)"),
+	}, "\n\n")
+
+	local ok, reply = LlmClient.chat({
+		{ role = "system", content = system },
+		{ role = "user", content = "Give me one short hint." },
+	}, { maxTokens = 90, temperature = 0.6 })
+
+	if ok then
+		return clip(reply, 220)
+	end
+	return "Ask them one question about what they need right now, then suggest something that fits."
+end
+
+-- ========== Evaluator ==========
+
+local EVAL_SCHEMA = [[Reply with ONLY a JSON object, no prose, no markdown fences, exactly this shape:
+{
+  "skills": [{"tag": "skill_tag", "name": "Plain-English skill name", "evidence": "one sentence citing a real customer and what the player did"}],
+  "wentWell": ["short bullet", "..."],
+  "wentWrong": ["short bullet", "..."],
+  "realWorldTransfer": "one sentence: where the child will use this in their own life",
+  "nextDrill": "one concrete thing to try next round"
+}]]
+
+local function toStringList(value: any): { string }
+	if typeof(value) ~= "table" then
+		return {}
+	end
+	local list = {}
+	for _, item in value do
+		if typeof(item) == "string" then
+			table.insert(list, item)
+		end
+	end
+	return list
+end
+
+local function tryParseEvaluation(raw: string): Evaluation?
+	local data = decodeObject(raw)
+	if not data then
+		return nil
+	end
+	if typeof(data.skills) ~= "table" or typeof(data.realWorldTransfer) ~= "string" or typeof(data.nextDrill) ~= "string" then
+		return nil
+	end
+	local skills = {}
+	for _, skill in data.skills do
+		if typeof(skill) == "table" then
+			table.insert(skills, {
+				tag = typeof(skill.tag) == "string" and skill.tag or "skill",
+				name = typeof(skill.name) == "string" and skill.name or tostring(skill.tag or "Skill"),
+				evidence = typeof(skill.evidence) == "string" and skill.evidence or "",
+			})
+		end
+	end
+	return {
+		skills = skills,
+		wentWell = toStringList(data.wentWell),
+		wentWrong = toStringList(data.wentWrong),
+		realWorldTransfer = data.realWorldTransfer,
+		nextDrill = data.nextDrill,
+	}
+end
+
+local function fallbackEvaluation(records: { SaleRecord }): Evaluation
+	local wentWell, wentWrong = {}, {}
+	for _, r in records do
+		if r.outcome == "bought" and r.stars >= 4 then
+			table.insert(wentWell, string.format("%s paid $%d and left happy (%d stars).", r.customer, r.paid, r.stars))
+		elseif r.stars <= 2 then
+			table.insert(wentWrong, string.format("%s left with %d stars.", r.customer, r.stars))
+		end
+	end
+	return {
+		skills = {
+			{ tag = "customer_service", name = "Serving customers", evidence = string.format("You talked with %d customers this round.", #records) },
+		},
+		wentWell = wentWell,
+		wentWrong = wentWrong,
+		realWorldTransfer = "Next time you sell something at a school fair or trade with a friend, ask what they need before you suggest anything.",
+		nextDrill = "Ask every customer one question about what they need before you suggest an item.",
+	}
+end
+
+function AgentRuntime.evaluate(pack: Pack, records: { SaleRecord }, summary: { [string]: any }): Evaluation
+	if #records == 0 then
+		return {
+			skills = {},
+			wentWell = {},
+			wentWrong = { "No customer finished a conversation this round." },
+			realWorldTransfer = "Selling starts with saying hello and asking what someone needs.",
+			nextDrill = "Greet the very first customer and ask what they're in the mood for.",
+		}
+	end
+
+	local system = table.concat({
+		pack.cast.evaluator,
+		"Skill tags available for this scenario: " .. table.concat(pack.skillTags, ", "),
+		pack.debriefTemplate,
+		EVAL_SCHEMA,
+	}, "\n\n")
+
+	local payload = HttpService:JSONEncode({
+		scenario = pack.title,
+		summary = summary,
+		customers = records,
+	})
+
+	local messages: { LlmClient.ChatMessage } = {
+		{ role = "system", content = system },
+		{ role = "user", content = "Here is the full round record. Evaluate it.\n" .. payload },
+	}
+
+	for attempt = 1, 2 do
+		local ok, reply = LlmClient.chat(messages, {
+			maxTokens = Config.MAX_TOKENS_EVALUATION,
+			temperature = 0.3,
+			jsonMode = true,
+		})
+		if not ok then
+			break
+		end
+		local parsed = tryParseEvaluation(reply)
+		if parsed then
+			return parsed
+		end
+		table.insert(messages, { role = "assistant", content = reply })
+		table.insert(messages, { role = "user", content = "That was not valid JSON. Reply again with ONLY the JSON object." })
+		if attempt == 1 then
+			task.wait(0.5)
+		end
+	end
+
+	warn("[KidSim] Evaluator fell back to deterministic debrief")
+	return fallbackEvaluation(records)
+end
+
+return AgentRuntime
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">Config</string>
+          <string name="Source"><![CDATA[--!strict
+-- Non-secret runtime configuration. Secrets never live here.
+--
+-- Key resolution order (see LlmClient):
+--   1. Creator Hub secret named SECRET_NAME (published experience)
+--   2. src/server/DevSecrets.luau (gitignored, see DevSecrets.example.luau)
+
+return {
+	-- Creator Hub secret name (Creator Dashboard -> your experience -> Secrets)
+	SECRET_NAME = "LLM_API_KEY",
+
+	-- Any OpenAI-compatible endpoint. GMI Cloud (event credits) by default;
+	-- DevSecrets.luau can override both of these.
+	BASE_URL = "https://api.gmi-serving.com/v1",
+	MODEL = "openai/gpt-oss-120b",
+
+	-- LLM budgets
+	MAX_TOKENS_CUSTOMER = 220, -- JSON turn: say + decision + items
+	MAX_TOKENS_EVALUATION = 700,
+
+	-- Round
+	ROUND_SECONDS = 180,
+	COUNTDOWN_SECONDS = 3,
+	MAX_LANES = 4,
+
+	-- Customers
+	CUSTOMER_IDLE_SECONDS = 35, -- customer gives up if the shopkeeper says nothing
+	GAP_BETWEEN_CUSTOMERS = 1.5,
+	COACH_HINTS_PER_CUSTOMER = 1,
+
+	-- Score = revenue + STARS_WEIGHT * sum(stars - 3).
+	-- A pushy sale that leaves a 1-star customer costs $4 of score.
+	STARS_WEIGHT = 2,
+	-- Word of mouth: the lane's average stars scale the next customer's wallet.
+	-- 3 stars = x1.0, each star above/below = +/- BUZZ_PER_STAR, clamped.
+	BUZZ_PER_STAR = 0.15,
+	BUZZ_MIN = 0.7,
+	BUZZ_MAX = 1.3,
+}
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">CustomerGen</string>
+          <string name="Source"><![CDATA[--!strict
+-- Random customer generator. Rolls a hidden profile (wallet, taste, price
+-- attitude, patience) plus a visible cue (age, situation) from the pack's
+-- CustomerSpec. Pack-agnostic: it only reads the spec.
+
+local Types = require(game.ReplicatedStorage.Shared.Types)
+
+type Pack = Types.Pack
+type CustomerProfile = Types.CustomerProfile
+type AgeGroup = Types.AgeGroup
+
+local CustomerGen = {}
+
+local nextId = 0
+
+local function pick<T>(rng: Random, list: { T }): T
+	return list[rng:NextInteger(1, #list)]
+end
+
+local function pickWeighted(rng: Random, groups: { AgeGroup }): AgeGroup
+	local total = 0
+	for _, group in groups do
+		total += group.weight
+	end
+	local roll = rng:NextNumber() * total
+	for _, group in groups do
+		roll -= group.weight
+		if roll <= 0 then
+			return group
+		end
+	end
+	return groups[#groups]
+end
+
+-- `buzz` scales the wallet (word of mouth from earlier customers' stars).
+-- `avoidName` keeps the same name from appearing twice in a row.
+function CustomerGen.generate(pack: Pack, rng: Random, buzz: number, avoidName: string?): CustomerProfile
+	local spec = pack.customers
+	local age = pickWeighted(rng, spec.ageGroups)
+
+	local name = pick(rng, spec.names)
+	for _ = 1, 4 do
+		if name ~= avoidName then
+			break
+		end
+		name = pick(rng, spec.names)
+	end
+
+	local baseWallet = rng:NextInteger(age.budgetMin, age.budgetMax)
+	local wallet = math.max(1, math.floor(baseWallet * buzz + 0.5))
+
+	nextId += 1
+	return {
+		id = nextId,
+		name = name,
+		look = pick(rng, spec.looks),
+		ageGroup = age.label,
+		situation = pick(rng, spec.situations),
+		taste = pick(rng, spec.tastes),
+		sensitivity = pick(rng, spec.sensitivities),
+		wallet = wallet,
+		patience = rng:NextInteger(spec.patienceMin, spec.patienceMax),
+	}
+end
+
+-- The only slice of a profile the client is allowed to see.
+function CustomerGen.visible(profile: CustomerProfile): { [string]: any }
+	return {
+		id = profile.id,
+		name = profile.name,
+		ageGroup = profile.ageGroup,
+		situation = profile.situation,
+	}
+end
+
+return CustomerGen
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">DevSecrets.example</string>
+          <string name="Source"><![CDATA[--!strict
+-- Copy this file to DevSecrets.luau (same folder) and fill it in for
+-- Studio playtests. DevSecrets.luau is gitignored — NEVER commit a key,
+-- and never put a key in any client script.
+--
+-- In the published experience, prefer a Creator Hub secret named
+-- "LLM_API_KEY" instead; this file is only the local-dev fallback.
+
+return {
+	API_KEY = "", -- sk-... / gmi key
+
+	-- Optional overrides (leave nil to use Config defaults)
+	BASE_URL = nil :: string?, -- e.g. "https://api.openai.com/v1"
+	MODEL = nil :: string?, -- e.g. "gpt-4o-mini"
+}
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">LaneEngine</string>
+          <string name="Source"><![CDATA[--!strict
+-- One player's counter for one timed round. Pulls random customers from
+-- CustomerGen, lets the child talk to each customer agent, and turns the
+-- agent's proposed decision into a validated sale (menu price, stock,
+-- wallet). Keeps the authoritative revenue / stars / stock and a record of
+-- every customer for the evaluator.
+--
+-- Pack-agnostic: no cafe concepts in this file.
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+
+local Types = require(game.ReplicatedStorage.Shared.Types)
+local Remotes = require(game.ReplicatedStorage.Shared.Remotes)
+local AgentRuntime = require(script.Parent.AgentRuntime)
+local CustomerGen = require(script.Parent.CustomerGen)
+local Config = require(script.Parent.Config)
+local LlmClient = require(script.Parent.LlmClient)
+
+type Pack = Types.Pack
+type CustomerProfile = Types.CustomerProfile
+type CustomerTurn = Types.CustomerTurn
+type SaleRecord = Types.SaleRecord
+
+export type LaneHooks = {
+	spawnCustomer: (profile: CustomerProfile) -> (),
+	despawnCustomer: () -> (),
+	setSign: (title: string, subtitle: string) -> (),
+	spawnCFrame: CFrame,
+}
+
+export type LaneStats = {
+	revenue: number,
+	avgStars: number,
+	served: number,
+	score: number,
+	walletSeen: number, -- total money in the wallets of finished customers
+}
+
+type Action = { kind: string, text: string? }
+
+local LaneEngine = {}
+LaneEngine.__index = LaneEngine
+
+export type LaneEngineInstance = typeof(setmetatable(
+	{} :: {
+		pack: Pack,
+		player: Player,
+		lane: LaneHooks,
+		endsAt: number,
+		onChange: () -> (),
+		rng: Random,
+		stock: { [string]: number },
+		revenue: number,
+		starsSum: number,
+		starsCount: number,
+		walletSeen: number,
+		records: { SaleRecord },
+		lastName: string?,
+		_queue: { Action },
+		_connections: { RBXScriptConnection },
+		_running: boolean,
+	},
+	LaneEngine
+))
+
+local STAR_GLYPHS = { "★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★" }
+
+function LaneEngine.new(pack: Pack, player: Player, lane: LaneHooks, endsAt: number, onChange: () -> ()): LaneEngineInstance
+	local stock = {}
+	for key, count in pack.initialStock do
+		stock[key] = count
+	end
+	local self = setmetatable({
+		pack = pack,
+		player = player,
+		lane = lane,
+		endsAt = endsAt,
+		onChange = onChange,
+		rng = Random.new(),
+		stock = stock,
+		revenue = 0,
+		starsSum = 0,
+		starsCount = 0,
+		walletSeen = 0,
+		records = {},
+		lastName = nil,
+		_queue = {},
+		_connections = {},
+		_running = false,
+	}, LaneEngine)
+	return self :: LaneEngineInstance
+end
+
+-- ---------- stats ----------
+
+function LaneEngine.stats(self: LaneEngineInstance): LaneStats
+	local starBonus = self.starsSum - 3 * self.starsCount
+	return {
+		revenue = self.revenue,
+		avgStars = if self.starsCount > 0 then self.starsSum / self.starsCount else 0,
+		served = self.starsCount,
+		score = self.revenue + Config.STARS_WEIGHT * starBonus,
+		walletSeen = self.walletSeen,
+	}
+end
+
+-- Word of mouth: happier customers so far -> fuller wallets next.
+function LaneEngine.buzz(self: LaneEngineInstance): number
+	if self.starsCount == 0 then
+		return 1
+	end
+	local avg = self.starsSum / self.starsCount
+	return math.clamp(1 + Config.BUZZ_PER_STAR * (avg - 3), Config.BUZZ_MIN, Config.BUZZ_MAX)
+end
+
+-- ---------- replication ----------
+
+function LaneEngine.sendState(self: LaneEngineInstance)
+	local stats = self:stats()
+	Remotes.get("State"):FireClient(self.player, {
+		revenue = stats.revenue,
+		avgStars = stats.avgStars,
+		served = stats.served,
+		score = stats.score,
+		stock = self.stock,
+		buzz = self:buzz(),
+	})
+	self.lane.setSign(self.player.DisplayName, string.format("$%d  ·  score %d", stats.revenue, stats.score))
+end
+
+function LaneEngine.say(self: LaneEngineInstance, speaker: string, text: string, kind: string)
+	Remotes.get("Dialogue"):FireClient(self.player, speaker, text, kind)
+end
+
+function LaneEngine.toast(self: LaneEngineInstance, text: string)
+	Remotes.get("Toast"):FireClient(self.player, text)
+end
+
+function LaneEngine.busy(self: LaneEngineInstance, busy: boolean, who: string?)
+	Remotes.get("Busy"):FireClient(self.player, busy, who)
+end
+
+-- ---------- input ----------
+
+function LaneEngine.bind(self: LaneEngineInstance)
+	table.insert(self._connections, Remotes.get("Say").OnServerEvent:Connect(function(player, text)
+		if player == self.player and typeof(text) == "string" and #text > 0 then
+			table.insert(self._queue, { kind = "say", text = string.sub(text, 1, 300) })
+		end
+	end))
+	table.insert(self._connections, Remotes.get("RequestHint").OnServerEvent:Connect(function(player)
+		if player == self.player then
+			table.insert(self._queue, { kind = "hint" })
+		end
+	end))
+end
+
+function LaneEngine.unbind(self: LaneEngineInstance)
+	for _, connection in self._connections do
+		connection:Disconnect()
+	end
+	self._connections = {}
+end
+
+function LaneEngine.timeLeft(self: LaneEngineInstance): number
+	return self.endsAt - os.clock()
+end
+
+function LaneEngine.isLive(self: LaneEngineInstance): boolean
+	return self._running and self:timeLeft() > 0 and self.player.Parent == Players
+end
+
+-- Next action, or nil on idle timeout / round end.
+function LaneEngine.waitForAction(self: LaneEngineInstance, timeout: number): Action?
+	local deadline = os.clock() + timeout
+	while self:isLive() and os.clock() < deadline do
+		if #self._queue > 0 then
+			return table.remove(self._queue, 1)
+		end
+		task.wait(0.05)
+	end
+	return nil
+end
+
+-- ---------- sale validation ----------
+
+-- Turn the agent's proposed basket into what can really happen: only menu
+-- items, capped by stock, trimmed (priciest first) to fit the wallet, and
+-- never charged above menu price.
+function LaneEngine.settle(
+	self: LaneEngineInstance,
+	profile: CustomerProfile,
+	turn: CustomerTurn
+): ({ [string]: number }, number, number, { string })
+	local notes: { string } = {}
+	local basket: { [string]: number } = {}
+	local menuValue = 0
+	local priceOf: { [string]: number } = {}
+	local labelOf: { [string]: string } = {}
+	for _, item in self.pack.menu do
+		priceOf[item.key] = item.price
+		labelOf[item.key] = item.label
+	end
+
+	-- agents write keys loosely ("hot chocolate", "Cookies"): match on key or
+	-- label, ignoring case, spaces, punctuation and a plural "s"
+	local function norm(s: string): string
+		return (string.lower(s):gsub("[^%w]", ""))
+	end
+	local keyOf: { [string]: string } = {}
+	for _, item in self.pack.menu do
+		keyOf[norm(item.key)] = item.key
+		keyOf[norm(item.label)] = item.key
+	end
+
+	for rawKey, qty in turn.items do
+		local key = keyOf[norm(rawKey)] or keyOf[(norm(rawKey):gsub("s$", ""))]
+		local price = if key then priceOf[key] else nil
+		if key and price then
+			local available = (self.stock[key] or 0) - (basket[key] or 0)
+			local take = math.min(qty, available)
+			if take < qty then
+				table.insert(notes, "Out of " .. labelOf[key] .. "!")
+			end
+			if take > 0 then
+				basket[key] = (basket[key] or 0) + take
+				menuValue += take * price
+			end
+		else
+			warn("[KidSim] Customer named an unknown item: " .. tostring(rawKey))
+		end
+	end
+
+	-- never charged above menu price; a discount the shopkeeper offered is fine
+	local intended = if turn.pay < 0 then menuValue else math.floor(turn.pay)
+	local pay = math.clamp(intended, 0, menuValue)
+
+	-- wallet cap on what they actually hand over: if the agreed price doesn't
+	-- fit, drop the priciest unit until it does
+	local byPrice = table.clone(self.pack.menu)
+	table.sort(byPrice, function(a, b)
+		return a.price > b.price
+	end)
+	while pay > profile.wallet do
+		local dropped = false
+		for _, item in byPrice do
+			local qty = basket[item.key]
+			if qty and qty > 0 then
+				basket[item.key] = if qty > 1 then qty - 1 else nil
+				menuValue -= item.price
+				pay = math.min(pay, menuValue)
+				dropped = true
+				break
+			end
+		end
+		if not dropped then
+			break
+		end
+	end
+
+	if intended > pay then
+		warn(string.format(
+			"[KidSim] Sale settled below the agreed price: agreed $%d, settled $%d, items %s",
+			intended,
+			pay,
+			HttpService:JSONEncode(turn.items)
+		))
+	end
+	return basket, menuValue, pay, notes
+end
+
+function LaneEngine.record(
+	self: LaneEngineInstance,
+	profile: CustomerProfile,
+	playerSaid: { string },
+	outcome: string,
+	basket: { [string]: number },
+	paid: number,
+	menuValue: number,
+	stars: number
+)
+	self.starsSum += stars
+	self.starsCount += 1
+	self.walletSeen += profile.wallet
+	table.insert(self.records, {
+		customer = profile.name,
+		ageGroup = profile.ageGroup,
+		situation = profile.situation,
+		taste = profile.taste,
+		sensitivity = profile.sensitivity.label,
+		wallet = profile.wallet,
+		playerSaid = playerSaid,
+		outcome = outcome,
+		items = basket,
+		paid = paid,
+		menuValue = menuValue,
+		stars = stars,
+	})
+	self:sendState()
+	self.onChange()
+end
+
+-- ---------- one customer ----------
+
+function LaneEngine.serveCustomer(self: LaneEngineInstance)
+	local profile = CustomerGen.generate(self.pack, self.rng, self:buzz(), self.lastName)
+	self.lastName = profile.name
+	self.lane.spawnCustomer(profile)
+	Remotes.get("Customer"):FireClient(self.player, CustomerGen.visible(profile))
+	task.wait(1.4) -- walk to the counter
+
+	if not self:isLive() then
+		self.lane.despawnCustomer()
+		return
+	end
+
+	self:busy(true, profile.name)
+	local _, opening, openingRaw = AgentRuntime.customerTurn(self.pack, profile, {}, profile.patience)
+	self:busy(false)
+	self:say(profile.name, opening.say, "npc")
+
+	local history: { LlmClient.ChatMessage } = {
+		{ role = "user", content = AgentRuntime.OPENING_PROMPT },
+		{ role = "assistant", content = openingRaw },
+	}
+	local transcript: { string } = { profile.name .. ": " .. opening.say }
+	local playerSaid: { string } = {}
+	local repliesLeft = profile.patience
+	local hintsUsed = 0
+
+	while true do
+		local action = self:waitForAction(Config.CUSTOMER_IDLE_SECONDS)
+		if not self:isLive() then
+			break -- round over mid-conversation: not scored
+		end
+
+		if action == nil then
+			self:say(profile.name, "I'll come back another time.", "npc")
+			self:record(profile, playerSaid, "timeout", {}, 0, 0, 2)
+			self:toast("Customer left waiting  " .. STAR_GLYPHS[2])
+			break
+		elseif action.kind == "hint" then
+			if hintsUsed < Config.COACH_HINTS_PER_CUSTOMER then
+				hintsUsed += 1
+				local hint = AgentRuntime.coachHint(self.pack, profile, transcript)
+				Remotes.get("CoachHint"):FireClient(self.player, hint)
+			else
+				Remotes.get("CoachHint"):FireClient(self.player, "That's your one hint for this customer — your call now.")
+			end
+		elseif action.kind == "say" and action.text then
+			local text = action.text
+			repliesLeft -= 1
+			table.insert(playerSaid, text)
+			table.insert(transcript, "Shopkeeper: " .. text)
+			table.insert(history, { role = "user", content = text })
+			self:say(self.player.DisplayName, text, "player")
+
+			self:busy(true, profile.name)
+			local _, turn, raw = AgentRuntime.customerTurn(self.pack, profile, history, repliesLeft)
+			self:busy(false)
+			if not self:isLive() then
+				break
+			end
+
+			table.insert(history, { role = "assistant", content = raw })
+			table.insert(transcript, profile.name .. ": " .. turn.say)
+			while #history > 14 do
+				table.remove(history, 3) -- keep the opening exchange, drop the oldest middle turns
+			end
+			self:say(profile.name, turn.say, "npc")
+
+			if turn.decision == "buy" then
+				local basket, menuValue, pay, notes = self:settle(profile, turn)
+				for _, note in notes do
+					self:toast(note)
+				end
+				if menuValue == 0 then
+					self:record(profile, playerSaid, "left", {}, 0, 0, turn.stars)
+					self:toast("No sale  " .. STAR_GLYPHS[turn.stars])
+				else
+					for key, qty in basket do
+						self.stock[key] -= qty
+					end
+					self.revenue += pay
+					self:record(profile, playerSaid, "bought", basket, pay, menuValue, turn.stars)
+					local discount = if pay < menuValue then string.format(" (gave $%d off)", menuValue - pay) else ""
+					self:toast(string.format("+$%d%s  %s", pay, discount, STAR_GLYPHS[turn.stars]))
+				end
+				break
+			elseif turn.decision == "leave" or repliesLeft <= 0 then
+				local stars = if turn.decision == "leave" then turn.stars else 3
+				self:record(profile, playerSaid, "left", {}, 0, 0, stars)
+				self:toast("No sale  " .. STAR_GLYPHS[stars])
+				break
+			end
+		end
+	end
+
+	Remotes.get("Customer"):FireClient(self.player, nil)
+	task.wait(1.2)
+	self.lane.despawnCustomer()
+end
+
+-- ---------- round ----------
+
+function LaneEngine.run(self: LaneEngineInstance)
+	self._running = true
+	self:bind()
+	self:sendState()
+	while self:isLive() do
+		self:serveCustomer()
+		if self:isLive() then
+			task.wait(Config.GAP_BETWEEN_CUSTOMERS)
+		end
+	end
+	self.lane.despawnCustomer()
+	self:unbind()
+	self._running = false
+end
+
+function LaneEngine.stop(self: LaneEngineInstance)
+	self._running = false
+	self:unbind()
+end
+
+return LaneEngine
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
+        <Properties>
+          <string name="Name">LlmClient</string>
+          <string name="Source"><![CDATA[--!strict
+-- Server-only LLM client over HttpService against any OpenAI-compatible
+-- /chat/completions endpoint. The API key is resolved server-side only:
+-- Creator Hub secret first, gitignored DevSecrets module second.
+
+local HttpService = game:GetService("HttpService")
+
+local Config = require(script.Parent.Config)
+
+export type ChatMessage = { role: string, content: string }
+export type ChatOptions = {
+	maxTokens: number?,
+	temperature: number?,
+	jsonMode: boolean?, -- ask for response_format json_object (dropped if the endpoint rejects it)
+}
+
+local LlmClient = {}
+
+type Settings = {
+	auth: Secret | string,
+	baseUrl: string,
+	model: string,
+}
+
+local cachedSettings: Settings? = nil
+local warnedOnce = false
+local jsonModeUnsupported = false
+
+local function resolveSettings(): Settings?
+	if cachedSettings then
+		return cachedSettings
+	end
+
+	local baseUrl: string = Config.BASE_URL
+	local model: string = Config.MODEL
+
+	local devModule = script.Parent:FindFirstChild("DevSecrets")
+	local devKey: string? = nil
+	if devModule and devModule:IsA("ModuleScript") then
+		local ok, dev = pcall(require, devModule)
+		if ok and typeof(dev) == "table" then
+			if typeof(dev.API_KEY) == "string" and #dev.API_KEY > 0 then
+				devKey = dev.API_KEY
+			end
+			if typeof(dev.BASE_URL) == "string" and #dev.BASE_URL > 0 then
+				baseUrl = dev.BASE_URL
+			end
+			if typeof(dev.MODEL) == "string" and #dev.MODEL > 0 then
+				model = dev.MODEL
+			end
+		end
+	end
+
+	-- Creator Hub secret wins when available (published experience).
+	local okSecret, secret = pcall(function()
+		return HttpService:GetSecret(Config.SECRET_NAME)
+	end)
+	if okSecret and secret then
+		cachedSettings = {
+			auth = secret:AddPrefix("Bearer "),
+			baseUrl = baseUrl,
+			model = model,
+		}
+		return cachedSettings
+	end
+
+	if devKey then
+		cachedSettings = {
+			auth = "Bearer " .. devKey,
+			baseUrl = baseUrl,
+			model = model,
+		}
+		return cachedSettings
+	end
+
+	if not warnedOnce then
+		warnedOnce = true
+		warn(
+			"[KidSim] No LLM key found. Add a Creator Hub secret named '"
+				.. Config.SECRET_NAME
+				.. "' or copy DevSecrets.example.luau to DevSecrets.luau. "
+				.. "Running with scripted fallback lines only."
+		)
+	end
+	return nil
+end
+
+function LlmClient.isConfigured(): boolean
+	return resolveSettings() ~= nil
+end
+
+-- Returns (true, replyText) or (false, errorMessage). Retries once.
+function LlmClient.chat(messages: { ChatMessage }, opts: ChatOptions?): (boolean, string)
+	local settings = resolveSettings()
+	if not settings then
+		return false, "no-api-key"
+	end
+
+	local options: ChatOptions = opts or {}
+	local function encode(withJson: boolean): string
+		local request: { [string]: any } = {
+			model = settings.model,
+			messages = messages,
+			max_tokens = options.maxTokens or Config.MAX_TOKENS_CUSTOMER,
+			temperature = options.temperature or 0.7,
+		}
+		if withJson then
+			request.response_format = { type = "json_object" }
+		end
+		return HttpService:JSONEncode(request)
+	end
+	local useJson = options.jsonMode == true and not jsonModeUnsupported
+
+	local lastErr = "unknown"
+	for attempt = 1, 2 do
+		local body = encode(useJson)
+		local ok, response = pcall(function()
+			return HttpService:RequestAsync({
+				Url = settings.baseUrl .. "/chat/completions",
+				Method = "POST",
+				Headers = {
+					["Content-Type"] = "application/json",
+					["Authorization"] = settings.auth,
+				},
+				Body = body,
+			})
+		end)
+
+		if ok and response.Success then
+			local okJson, data = pcall(function()
+				return HttpService:JSONDecode(response.Body)
+			end)
+			if okJson and data.choices and data.choices[1] and data.choices[1].message then
+				local content = data.choices[1].message.content
+				if typeof(content) == "string" and #content > 0 then
+					return true, content
+				end
+			end
+			lastErr = "bad-response-shape"
+		elseif ok then
+			lastErr = "http-" .. tostring(response.StatusCode) .. ": " .. string.sub(response.Body or "", 1, 200)
+			-- some OpenAI-compatible hosts reject response_format; retry plain
+			if useJson and response.StatusCode == 400 then
+				useJson = false
+				jsonModeUnsupported = true
+			end
+		else
+			lastErr = tostring(response)
+		end
+
+		if attempt == 1 then
+			task.wait(1)
+		end
+	end
+
+	warn("[KidSim] LLM call failed: " .. lastErr)
+	return false, lastErr
+end
+
+return LlmClient
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Script" referent="12">
+        <Properties>
+          <string name="Name">Main</string>
+          <token name="RunContext">0</token>
+          <string name="Source"><![CDATA[--!strict
+-- Boot: create remotes, build the world (one counter lane per possible
+-- player), and hand everything to the RoundManager. Swapping ACTIVE_PACK to
+-- a different module is the whole "new scenario" story — the engine does
+-- not change.
+
+local Remotes = require(game.ReplicatedStorage.Shared.Remotes)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+local RoundManager = require(script.Parent.RoundManager)
+local LlmClient = require(script.Parent.LlmClient)
+local Config = require(script.Parent.Config)
+
+local ACTIVE_PACK = require(script.Parent.Packs.CafeShift)
+
+Remotes.init()
+local world = WorldBuilder.build(ACTIVE_PACK, Config.MAX_LANES)
+
+print("[KidSim] Pack loaded: " .. ACTIVE_PACK.title .. " (" .. ACTIVE_PACK.id .. ")")
+print("[KidSim] LLM configured: " .. tostring(LlmClient.isConfigured()))
+
+RoundManager.start(ACTIVE_PACK, world)
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="13">
+        <Properties>
+          <string name="Name">Packs</string>
+        </Properties>
+        <Item class="ModuleScript" referent="14">
+          <Properties>
+            <string name="Name">CafeShift</string>
+            <string name="Source"><![CDATA[--!strict
+-- Cafe Shift — ONE scenario pack. The engine never reads cafe concepts;
+-- everything cafe lives here. Court, negotiation, accounting = new packs.
+--
+-- No scripted incidents: every customer is generated from the ranges
+-- below and played by an LLM agent. The child's job is to read the
+-- customer, suggest what actually fits, and earn as much of their wallet
+-- as they can WITHOUT making them unhappy (stars are part of the score).
+
+local Types = require(game.ReplicatedStorage.Shared.Types)
+
+type Pack = Types.Pack
+
+local AGE_GUARDRAILS = table.concat({
+	"The shopkeeper is a child around 10-13 years old.",
+	"Keep every line to 1-2 short sentences of spoken dialogue: no narration, no stage directions, no emoji spam.",
+	"Stay strictly age-appropriate: no romance, no violence, no scary content, no adult topics.",
+	"Never mention being an AI, a simulation, prompts, JSON, or game mechanics in what you say.",
+	"If the shopkeeper is rude, react like a normal person would (mildly hurt or annoyed), never crude.",
+}, " ")
+
+local pack: Pack = {
+	id = "cafe_shift",
+	title = "Cafe Shift",
+	thesis = "Practice real skills in Roblox. Take them into the real world.",
+	briefing = "You each run a counter at Sunny Side Cafe. Customers walk up with real wallets and real moods. Talk to them, figure out what they actually want, and make the sale. Your score is the money you earn PLUS how happy they leave — pushy sales cost you, and happy customers tell their friends.",
+	skillTags = { "asking_questions", "reading_people", "upselling", "honest_pricing", "negotiation", "customer_service" },
+
+	menu = {
+		{ key = "coffee", label = "Coffee", price = 4 },
+		{ key = "hotchoc", label = "Hot Chocolate", price = 3 },
+		{ key = "lemonade", label = "Lemonade", price = 3 },
+		{ key = "sandwich", label = "Sandwich", price = 6 },
+		{ key = "croissant", label = "Croissant", price = 3 },
+		{ key = "cookie", label = "Cookie", price = 2 },
+	},
+
+	initialStock = {
+		coffee = 12,
+		hotchoc = 10,
+		lemonade = 10,
+		sandwich = 6,
+		croissant = 8,
+		cookie = 15,
+	},
+
+	customers = {
+		names = {
+			"Maya", "Mr. Park", "Grandma Ro", "Dev", "Joon", "Aisha", "Leo", "Ms. Okafor", "Sam", "Yuna",
+			"Carlos", "Priya", "Ben", "Hana", "Mr. Silva", "Zoe", "Omar", "Lily", "Grandpa Ken", "Nina",
+		},
+		looks = { "yellow", "red", "purple", "blue", "green", "orange", "pink", "teal" },
+		ageGroups = {
+			{ label = "kid", budgetMin = 2, budgetMax = 8, weight = 2 },
+			{ label = "teen", budgetMin = 5, budgetMax = 14, weight = 3 },
+			{ label = "adult", budgetMin = 8, budgetMax = 30, weight = 4 },
+			{ label = "senior", budgetMin = 6, budgetMax = 20, weight = 2 },
+		},
+		situations = {
+			"in a hurry to catch the bus",
+			"on a lunch break from work",
+			"treating a grandchild to something nice",
+			"studying for a big test later today",
+			"picking up snacks for a team meeting",
+			"just finished soccer practice and is starving",
+			"celebrating a friend's birthday",
+			"feeling a bit down today",
+			"a tourist who has never been here before",
+			"waiting for a friend who is running late",
+			"cold from the rain outside",
+			"looking for a gift for a neighbour",
+		},
+		tastes = {
+			"sweet things, especially anything with chocolate",
+			"healthy-ish food, not too much sugar",
+			"strong coffee and nothing fancy",
+			"something filling, they skipped breakfast",
+			"cold drinks",
+			"trying something new they've never had",
+			"warm drinks",
+			"small treats to share with others",
+		},
+		sensitivities = {
+			{
+				label = "frugal",
+				prompt = "You count every dollar. You like a fair deal and get annoyed by pushy upselling, but a suggestion that genuinely fits your need can still win you over.",
+			},
+			{
+				label = "normal",
+				prompt = "You spend normally. A friendly, relevant suggestion can talk you into one more thing; pushiness puts you off.",
+			},
+			{
+				label = "generous",
+				prompt = "You happily spend on things that feel worth it and enjoy being looked after. You will add items if the shopkeeper makes them sound good and fitting.",
+			},
+		},
+		patienceMin = 3,
+		patienceMax = 6,
+	},
+
+	cast = {
+		customerBase = "You are a customer at Sunny Side Cafe, a small cafe run by a kid. " .. AGE_GUARDRAILS,
+		coach = table.concat({
+			"You are a friendly sales coach whispering to a kid running a cafe counter.",
+			"Give EXACTLY ONE hint, maximum 2 short sentences, in plain words a 10-year-old knows.",
+			"Help them read the customer and sell well AND kindly: ask a question, connect the menu to what the customer needs, be honest about prices.",
+			"You only know what the kid can see (the customer's look and situation and the conversation so far), not their wallet. Never take the action for them.",
+		}, " "),
+		evaluator = table.concat({
+			"You are a kind but honest skills evaluator for a children's life-skills simulator.",
+			"The child just ran a cafe counter for one timed round. You receive every customer they served: the customer's hidden profile (wallet, taste, price attitude), what the child said, what was bought, what was paid, and the stars the customer gave.",
+			"Good selling means: asking questions to discover needs, suggesting things that fit, being honest about prices, and leaving people happy. Squeezing money out of an unhappy customer is NOT good selling.",
+			"Judge only from the record. Cite real customers, real lines and real numbers as evidence.",
+			"Plain words a 10-year-old understands. Encouraging, specific, never empty praise.",
+		}, " "),
+	},
+
+	debriefTemplate = table.concat({
+		"Name at most 3 skills in plain English, each with evidence from a specific customer.",
+		"realWorldTransfer must connect to the child's own life (selling at a school fair, convincing a parent, trading with a friend, a lemonade stand), not just jobs.",
+		"Only mention things that actually happened in the record. The next drill must be doable in one more round.",
+	}, " "),
+}
+
+return pack
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+      <Item class="ModuleScript" referent="15">
+        <Properties>
+          <string name="Name">RoundManager</string>
+          <string name="Source"><![CDATA[--!strict
+-- Multiplayer round flow, shared by everyone in the server:
+--   lobby -> countdown -> running (timed) -> results -> lobby
+-- Each player owns one counter lane. A LaneEngine runs per player per
+-- round; the leaderboard compares everyone's score live and at the end.
+-- Players who join mid-round get a lane but wait for the next round.
+
+local Players = game:GetService("Players")
+
+local Types = require(game.ReplicatedStorage.Shared.Types)
+local Remotes = require(game.ReplicatedStorage.Shared.Remotes)
+local LaneEngine = require(script.Parent.LaneEngine)
+local AgentRuntime = require(script.Parent.AgentRuntime)
+local Config = require(script.Parent.Config)
+
+type Pack = Types.Pack
+type LeaderboardRow = Types.LeaderboardRow
+type LaneHooks = LaneEngine.LaneHooks
+type LaneEngineInstance = LaneEngine.LaneEngineInstance
+
+type World = { lanes: { LaneHooks }, setOpen: (open: boolean) -> () }
+
+local RoundManager = {}
+
+function RoundManager.start(pack: Pack, world: World)
+	local phase = "lobby"
+	local laneOwner: { [number]: Player } = {}
+	local laneOf: { [Player]: number } = {}
+	local engines: { [Player]: LaneEngineInstance } = {}
+	local endsAt = 0
+	local lastResults: { [string]: any }? = nil
+
+	-- ---------- lanes ----------
+
+	local function resetSign(index: number)
+		local owner = laneOwner[index]
+		world.lanes[index].setSign(if owner then owner.DisplayName else "Counter " .. index, if owner then "ready" else "open")
+	end
+
+	local function assignLane(player: Player): number?
+		if laneOf[player] then
+			return laneOf[player]
+		end
+		for index = 1, #world.lanes do
+			if laneOwner[index] == nil then
+				laneOwner[index] = player
+				laneOf[player] = index
+				resetSign(index)
+				return index
+			end
+		end
+		return nil
+	end
+
+	local function releaseLane(player: Player)
+		local index = laneOf[player]
+		if index then
+			laneOwner[index] = nil
+			laneOf[player] = nil
+			resetSign(index)
+		end
+	end
+
+	local function placeCharacter(player: Player)
+		local index = laneOf[player]
+		local character = player.Character
+		if not index or not character then
+			return
+		end
+		local root = character:WaitForChild("HumanoidRootPart", 5)
+		if root then
+			character:PivotTo(world.lanes[index].spawnCFrame)
+		end
+	end
+
+	-- ---------- broadcasting ----------
+
+	local function leaderboard(): { LeaderboardRow }
+		local rows: { LeaderboardRow } = {}
+		for index, player in laneOwner do
+			local engine = engines[player]
+			local stats = if engine then engine:stats() else { revenue = 0, avgStars = 0, served = 0, score = 0, walletSeen = 0 }
+			table.insert(rows, {
+				userId = player.UserId,
+				name = player.DisplayName,
+				lane = index,
+				revenue = stats.revenue,
+				avgStars = stats.avgStars,
+				served = stats.served,
+				score = stats.score,
+			})
+		end
+		table.sort(rows, function(a, b)
+			if a.score ~= b.score then
+				return a.score > b.score
+			end
+			return a.lane < b.lane
+		end)
+		return rows
+	end
+
+	local function broadcastLeaderboard()
+		Remotes.get("Leaderboard"):FireAllClients(leaderboard())
+	end
+
+	local function lobbyPayload(player: Player): { [string]: any }
+		return {
+			title = pack.title,
+			thesis = pack.thesis,
+			briefing = pack.briefing,
+			menu = pack.menu,
+			roundSeconds = Config.ROUND_SECONDS,
+			lane = laneOf[player],
+			lanesFull = laneOf[player] == nil,
+		}
+	end
+
+	local function sendPhaseTo(player: Player)
+		if phase == "lobby" then
+			Remotes.get("Phase"):FireClient(player, "lobby", lobbyPayload(player))
+		elseif phase == "countdown" or phase == "running" or phase == "closing" then
+			if engines[player] then
+				Remotes.get("Phase"):FireClient(player, phase, { lane = laneOf[player] })
+			else
+				Remotes.get("Phase"):FireClient(player, "waiting", lobbyPayload(player))
+			end
+		elseif phase == "results" then
+			Remotes.get("Phase"):FireClient(player, "waiting", lobbyPayload(player))
+			if lastResults then
+				Remotes.get("Debrief"):FireClient(player, { leaderboard = lastResults.leaderboard })
+			end
+		end
+		Remotes.get("Leaderboard"):FireClient(player, leaderboard())
+	end
+
+	local function sendPhaseAll()
+		for _, player in Players:GetPlayers() do
+			sendPhaseTo(player)
+		end
+	end
+
+	-- ---------- round ----------
+
+	local function finishRound()
+		phase = "closing"
+		world.setOpen(false)
+		for _, engine in engines do
+			engine:stop()
+		end
+		sendPhaseAll()
+
+		local finalBoard = leaderboard()
+		local rankOf: { [number]: number } = {}
+		for rank, row in finalBoard do
+			rankOf[row.userId] = rank
+		end
+
+		-- evaluate every lane in parallel
+		local pending = 0
+		for player, engine in engines do
+			pending += 1
+			task.spawn(function()
+				local stats = engine:stats()
+				local evaluation = AgentRuntime.evaluate(pack, engine.records, {
+					revenue = stats.revenue,
+					averageStars = stats.avgStars,
+					customersServed = stats.served,
+					moneyInTheirWallets = stats.walletSeen,
+					score = stats.score,
+					rank = rankOf[player.UserId],
+					players = #finalBoard,
+				})
+				if player.Parent == Players then
+					Remotes.get("Debrief"):FireClient(player, {
+						leaderboard = finalBoard,
+						rank = rankOf[player.UserId],
+						stats = stats,
+						records = engine.records,
+						menu = pack.menu,
+						evaluation = evaluation,
+						thesis = pack.thesis,
+						title = pack.title,
+					})
+				end
+				pending -= 1
+			end)
+		end
+		local waitedSince = os.clock()
+		while pending > 0 and os.clock() - waitedSince < 40 do
+			task.wait(0.2)
+		end
+
+		lastResults = { leaderboard = finalBoard }
+		phase = "results"
+		for _, player in Players:GetPlayers() do
+			if not engines[player] then
+				sendPhaseTo(player)
+			end
+		end
+	end
+
+	local function startRound()
+		if phase ~= "lobby" then
+			return
+		end
+		phase = "countdown"
+		engines = {}
+		endsAt = os.clock() + Config.COUNTDOWN_SECONDS + Config.ROUND_SECONDS
+		for index, player in laneOwner do
+			placeCharacter(player)
+			engines[player] = LaneEngine.new(pack, player, world.lanes[index], endsAt, broadcastLeaderboard)
+		end
+		sendPhaseAll()
+		broadcastLeaderboard()
+		for remaining = Config.COUNTDOWN_SECONDS, 1, -1 do
+			Remotes.get("Timer"):FireAllClients(remaining, "countdown")
+			task.wait(1)
+		end
+
+		phase = "running"
+		world.setOpen(true)
+		sendPhaseAll()
+		for _, engine in engines do
+			task.spawn(function()
+				engine:run()
+			end)
+		end
+		while os.clock() < endsAt do
+			Remotes.get("Timer"):FireAllClients(math.max(0, math.ceil(endsAt - os.clock())), "running")
+			task.wait(1)
+		end
+		Remotes.get("Timer"):FireAllClients(0, "running")
+		finishRound()
+	end
+
+	local function backToLobby()
+		if phase ~= "results" then
+			return
+		end
+		phase = "lobby"
+		engines = {}
+		lastResults = nil
+		for index in laneOwner do
+			resetSign(index)
+		end
+		sendPhaseAll()
+		broadcastLeaderboard()
+	end
+
+	-- ---------- players ----------
+
+	local function onPlayerAdded(player: Player)
+		assignLane(player)
+		player.CharacterAdded:Connect(function()
+			task.wait(0.2)
+			placeCharacter(player)
+		end)
+		if player.Character then
+			task.spawn(placeCharacter, player)
+		end
+		-- give the client a moment to hook its remotes
+		task.delay(1, function()
+			if player.Parent == Players then
+				sendPhaseTo(player)
+				broadcastLeaderboard()
+			end
+		end)
+	end
+
+	Players.PlayerAdded:Connect(onPlayerAdded)
+	-- Play Solo can join the player before the connection above exists
+	for _, player in Players:GetPlayers() do
+		task.spawn(onPlayerAdded, player)
+	end
+
+	Players.PlayerRemoving:Connect(function(player)
+		local engine = engines[player]
+		if engine then
+			engine:stop()
+		end
+		releaseLane(player)
+		broadcastLeaderboard()
+	end)
+
+	Remotes.get("StartRound").OnServerEvent:Connect(function(player)
+		if phase == "lobby" and laneOf[player] then
+			task.spawn(startRound)
+		end
+	end)
+	Remotes.get("Continue").OnServerEvent:Connect(function()
+		backToLobby()
+	end)
+end
+
+return RoundManager
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="16">
+        <Properties>
+          <string name="Name">WorldBuilder</string>
+          <string name="Source"><![CDATA[--!strict
+-- Builds the whole playable space from code (no manual Studio editing):
+-- one long cafe with N counter lanes side by side, so friends can see each
+-- other's counters and live scores. Exposes per-lane hooks the LaneEngine
+-- calls (spawnCustomer / despawnCustomer / setSign) and a global setOpen.
+-- Visuals are deliberately simple blocks — the demo is the loop, not the map.
+
+local TweenService = game:GetService("TweenService")
+
+local Types = require(game.ReplicatedStorage.Shared.Types)
+type Pack = Types.Pack
+type CustomerProfile = Types.CustomerProfile
+
+local WorldBuilder = {}
+
+local LOOK_COLORS: { [string]: Color3 } = {
+	yellow = Color3.fromRGB(240, 200, 80),
+	red = Color3.fromRGB(220, 90, 80),
+	purple = Color3.fromRGB(170, 120, 220),
+	blue = Color3.fromRGB(90, 140, 230),
+	green = Color3.fromRGB(110, 190, 110),
+	orange = Color3.fromRGB(240, 150, 70),
+	pink = Color3.fromRGB(240, 140, 180),
+	teal = Color3.fromRGB(70, 180, 170),
+}
+
+local LANE_SPACING = 16
+local COUNTER_Z = 3
+local CUSTOMER_Z = 6 -- where customers stand, in front of the counter
+local DOOR_Z = 26 -- where customers appear
+local BEHIND_Z = -3 -- where the shopkeeper stands
+
+local function part(props: { [string]: any }): Part
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	for key, value in props do
+		(p :: any)[key] = value
+	end
+	return p
+end
+
+local function textLabel(parent: Instance, text: string, font: Enum.Font, size: number, color: Color3): TextLabel
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = font
+	label.TextSize = size
+	label.TextColor3 = color
+	label.TextStrokeTransparency = 0.4
+	label.Text = text
+	label.Parent = parent
+	return label
+end
+
+local function menuBoardText(pack: Pack): string
+	local lines = { string.upper(pack.title), "----------------------" }
+	for _, item in pack.menu do
+		local dots = string.rep(".", math.max(2, 16 - #item.label))
+		table.insert(lines, string.format("%s %s $%d", item.label, dots, item.price))
+	end
+	return table.concat(lines, "\n")
+end
+
+function WorldBuilder.build(pack: Pack, laneCount: number)
+	local folder = Instance.new("Folder")
+	folder.Name = "KidSimWorld"
+	folder.Parent = workspace
+
+	local halfWidth = laneCount * LANE_SPACING / 2 + 4
+
+	-- floor, walls
+	part({
+		Name = "Floor",
+		Size = Vector3.new(halfWidth * 2, 1, 60),
+		Position = Vector3.new(0, 0, 10),
+		Color = Color3.fromRGB(225, 214, 196),
+		Material = Enum.Material.WoodPlanks,
+		Parent = folder,
+	})
+	part({
+		Name = "BackWall",
+		Size = Vector3.new(halfWidth * 2, 14, 1),
+		Position = Vector3.new(0, 7, -19.5),
+		Color = Color3.fromRGB(188, 142, 102),
+		Material = Enum.Material.Brick,
+		Parent = folder,
+	})
+	for _, side in { -1, 1 } do
+		part({
+			Name = if side < 0 then "LeftWall" else "RightWall",
+			Size = Vector3.new(1, 14, 60),
+			Position = Vector3.new(side * (halfWidth + 0.5), 7, 10),
+			Color = Color3.fromRGB(205, 170, 135),
+			Material = Enum.Material.Brick,
+			Parent = folder,
+		})
+	end
+
+	-- one shared menu board
+	local board = part({
+		Name = "MenuBoard",
+		Size = Vector3.new(14, 8, 0.4),
+		Position = Vector3.new(0, 8.5, -19),
+		Color = Color3.fromRGB(40, 44, 42),
+		Material = Enum.Material.SmoothPlastic,
+		Parent = folder,
+	})
+	local boardGui = Instance.new("SurfaceGui")
+	boardGui.Face = Enum.NormalId.Back -- +Z face, toward the counters
+	boardGui.CanvasSize = Vector2.new(520, 300)
+	boardGui.Parent = board
+	textLabel(boardGui, menuBoardText(pack), Enum.Font.Code, 28, Color3.fromRGB(240, 235, 210))
+
+	-- open/closed sign over the door
+	local sign = part({
+		Name = "OpenSign",
+		Size = Vector3.new(8, 2.4, 0.4),
+		Position = Vector3.new(0, 12, DOOR_Z),
+		Color = Color3.fromRGB(200, 70, 70),
+		Material = Enum.Material.Neon,
+		Parent = folder,
+	})
+	local signGui = Instance.new("SurfaceGui")
+	signGui.Face = Enum.NormalId.Front -- -Z face, toward the inside
+	signGui.CanvasSize = Vector2.new(400, 120)
+	signGui.Parent = sign
+	local signLabel = textLabel(signGui, "CLOSED", Enum.Font.GothamBlack, 64, Color3.fromRGB(255, 255, 255))
+
+	-- fallback spawn in the middle; RoundManager teleports players to lanes
+	local spawnLocation = Instance.new("SpawnLocation")
+	spawnLocation.Size = Vector3.new(4, 1, 4)
+	spawnLocation.Position = Vector3.new(0, 0.5, BEHIND_Z - 6)
+	spawnLocation.Anchored = true
+	spawnLocation.Neutral = true
+	spawnLocation.Transparency = 1
+	spawnLocation.CanCollide = false
+	spawnLocation.Duration = 0
+	spawnLocation.Parent = folder
+
+	local lanes = {}
+	for index = 1, laneCount do
+		local x = (index - (laneCount + 1) / 2) * LANE_SPACING
+		local laneFolder = Instance.new("Folder")
+		laneFolder.Name = "Lane" .. index
+		laneFolder.Parent = folder
+
+		part({
+			Name = "Counter",
+			Size = Vector3.new(11, 3.6, 2.5),
+			Position = Vector3.new(x, 1.8, COUNTER_Z),
+			Color = Color3.fromRGB(110, 76, 48),
+			Material = Enum.Material.Wood,
+			Parent = laneFolder,
+		})
+		part({
+			Name = "Till",
+			Size = Vector3.new(2, 1.6, 1.4),
+			Position = Vector3.new(x + 3.5, 4.4, COUNTER_Z),
+			Color = Color3.fromRGB(60, 60, 66),
+			Material = Enum.Material.Metal,
+			Parent = laneFolder,
+		})
+		part({
+			Name = "PastryCase",
+			Size = Vector3.new(4, 1.4, 1.8),
+			Position = Vector3.new(x - 3, 4.3, COUNTER_Z),
+			Color = Color3.fromRGB(235, 235, 240),
+			Material = Enum.Material.Glass,
+			Transparency = 0.45,
+			Parent = laneFolder,
+		})
+		-- low divider between this lane and the next ("rails")
+		if index < laneCount then
+			part({
+				Name = "Divider",
+				Size = Vector3.new(0.6, 4, 16),
+				Position = Vector3.new(x + LANE_SPACING / 2, 2, 1),
+				Color = Color3.fromRGB(150, 110, 80),
+				Material = Enum.Material.Wood,
+				Parent = laneFolder,
+			})
+		end
+
+		-- floating lane sign: owner + live score, readable from every lane
+		local anchor = part({
+			Name = "SignAnchor",
+			Size = Vector3.new(1, 1, 1),
+			Position = Vector3.new(x, 9, COUNTER_Z),
+			Transparency = 1,
+			CanCollide = false,
+			Parent = laneFolder,
+		})
+		local laneGui = Instance.new("BillboardGui")
+		laneGui.Size = UDim2.fromOffset(240, 64)
+		laneGui.MaxDistance = 200
+		laneGui.Parent = anchor
+		local laneTitle = textLabel(laneGui, "Counter " .. index, Enum.Font.GothamBlack, 24, Color3.fromRGB(255, 255, 255))
+		laneTitle.Size = UDim2.new(1, 0, 0.55, 0)
+		local laneSub = textLabel(laneGui, "open", Enum.Font.GothamBold, 18, Color3.fromRGB(255, 230, 170))
+		laneSub.Size = UDim2.new(1, 0, 0.45, 0)
+		laneSub.Position = UDim2.fromScale(0, 0.55)
+
+		local counterFront = Vector3.new(x, 3, CUSTOMER_Z)
+		local doorPos = Vector3.new(x, 3, DOOR_Z)
+		local currentNpc: Model? = nil
+
+		local function despawnCustomer()
+			local npc = currentNpc
+			currentNpc = nil
+			if not npc then
+				return
+			end
+			local body = npc:FindFirstChild("Body") :: Part?
+			local head = npc:FindFirstChild("Head") :: Part?
+			if body and head then
+				local walkInfo = TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
+				TweenService:Create(body, walkInfo, { Position = doorPos }):Play()
+				TweenService:Create(head, walkInfo, { Position = doorPos + Vector3.new(0, 2.3, 0) }):Play()
+			end
+			task.delay(1.3, function()
+				npc:Destroy()
+			end)
+		end
+
+		local function spawnCustomer(profile: CustomerProfile)
+			if currentNpc then
+				currentNpc:Destroy()
+				currentNpc = nil
+			end
+			local color = LOOK_COLORS[profile.look] or Color3.fromRGB(180, 180, 180)
+			-- kids are a bit shorter
+			local height = if profile.ageGroup == "kid" then 2.2 else 3
+
+			local npc = Instance.new("Model")
+			npc.Name = profile.name
+			local body = part({
+				Name = "Body",
+				Size = Vector3.new(2, height, 1.2),
+				Position = doorPos,
+				Color = color,
+				Material = Enum.Material.SmoothPlastic,
+				Parent = npc,
+			})
+			local headOffset = Vector3.new(0, height / 2 + 0.8, 0)
+			local head = part({
+				Name = "Head",
+				Shape = Enum.PartType.Ball,
+				Size = Vector3.new(1.6, 1.6, 1.6),
+				Position = doorPos + headOffset,
+				Color = Color3.fromRGB(245, 215, 180),
+				Material = Enum.Material.SmoothPlastic,
+				Parent = npc,
+			})
+			local face = Instance.new("Decal")
+			face.Texture = "rbxasset://textures/face.png"
+			face.Face = Enum.NormalId.Front
+			face.Parent = head
+
+			local nameGui = Instance.new("BillboardGui")
+			nameGui.Size = UDim2.fromOffset(160, 32)
+			nameGui.StudsOffset = Vector3.new(0, 1.5, 0)
+			nameGui.MaxDistance = 60
+			nameGui.Parent = head
+			textLabel(nameGui, profile.name, Enum.Font.GothamBold, 18, Color3.fromRGB(255, 255, 255))
+
+			npc.PrimaryPart = body
+			npc.Parent = laneFolder
+			currentNpc = npc
+
+			local walkInfo = TweenInfo.new(1.3, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+			TweenService:Create(body, walkInfo, { Position = counterFront - Vector3.new(0, (3 - height) / 2, 0) }):Play()
+			TweenService:Create(head, walkInfo, { Position = counterFront - Vector3.new(0, (3 - height) / 2, 0) + headOffset }):Play()
+		end
+
+		local function setSign(title: string, subtitle: string)
+			laneTitle.Text = title
+			laneSub.Text = subtitle
+		end
+
+		lanes[index] = {
+			spawnCustomer = spawnCustomer,
+			despawnCustomer = despawnCustomer,
+			setSign = setSign,
+			spawnCFrame = CFrame.lookAt(Vector3.new(x, 3, BEHIND_Z), Vector3.new(x, 3, CUSTOMER_Z + 10)),
+		}
+	end
+
+	local function setOpen(open: boolean)
+		sign.Color = open and Color3.fromRGB(70, 180, 110) or Color3.fromRGB(200, 70, 70)
+		signLabel.Text = open and "OPEN" or "CLOSED"
+	end
+
+	return {
+		lanes = lanes,
+		setOpen = setOpen,
+	}
+end
+
+return WorldBuilder
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="17">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="18">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="Folder" referent="19">
+        <Properties>
+          <string name="Name">KidSimClient</string>
+        </Properties>
+        <Item class="LocalScript" referent="20">
+          <Properties>
+            <string name="Name">Main</string>
+            <string name="Source"><![CDATA[--!strict
+-- All player-facing UI, built from code: lobby card, round timer + HUD,
+-- live leaderboard, the customer conversation (free chat only — the
+-- customer agent decides), one coach hint per customer, and the end-of-
+-- round results + sim-to-real debrief. Pack-agnostic: the menu and copy
+-- arrive in the lobby payload.
+--
+-- Every UIListLayout sorts by LayoutOrder (the engine default is Name,
+-- which silently reorders siblings that share a class name). Key widgets
+-- carry stable Names so tests can target them by path.
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+-- WaitForChild: on a live server the client can run before Shared replicates
+local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Remotes"))
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ---------- palette ----------
+local INK = Color3.fromRGB(34, 32, 29)
+local PAPER = Color3.fromRGB(248, 243, 234)
+local PAPER_DIM = Color3.fromRGB(236, 229, 216)
+local MUTED = Color3.fromRGB(130, 122, 110)
+local SOFT = Color3.fromRGB(100, 92, 80)
+local ACCENT = Color3.fromRGB(214, 124, 48)
+local GOOD = Color3.fromRGB(62, 142, 94)
+local BAD = Color3.fromRGB(186, 70, 60)
+local COACH = Color3.fromRGB(78, 112, 180)
+local GOLD = Color3.fromRGB(226, 172, 52)
+
+-- ---------- tiny UI helpers ----------
+
+local function round(instance: GuiObject, radius: number?)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius or 10)
+	corner.Parent = instance
+end
+
+local function pad(instance: GuiObject, all: number)
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, all)
+	padding.PaddingBottom = UDim.new(0, all)
+	padding.PaddingLeft = UDim.new(0, all)
+	padding.PaddingRight = UDim.new(0, all)
+	padding.Parent = instance
+end
+
+local function list(parent: Instance, horizontal: boolean, gap: number): UIListLayout
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = if horizontal then Enum.FillDirection.Horizontal else Enum.FillDirection.Vertical
+	layout.Padding = UDim.new(0, gap)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = parent
+	return layout
+end
+
+local function label(parent: Instance, text: string, size: number, color: Color3?, bold: boolean?, order: number?): TextLabel
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+	l.TextSize = size
+	l.TextColor3 = color or INK
+	l.Text = text
+	l.TextWrapped = true
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.LayoutOrder = order or 0
+	l.Parent = parent
+	return l
+end
+
+-- full-width, auto-height paragraph
+local function para(parent: Instance, text: string, size: number, color: Color3?, bold: boolean?, order: number?): TextLabel
+	local l = label(parent, text, size, color, bold, order)
+	l.Size = UDim2.new(1, 0, 0, 0)
+	l.AutomaticSize = Enum.AutomaticSize.Y
+	return l
+end
+
+local function button(parent: Instance, name: string, text: string, bg: Color3, fg: Color3, order: number?): TextButton
+	local b = Instance.new("TextButton")
+	b.Name = name
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 16
+	b.TextColor3 = fg
+	b.BackgroundColor3 = bg
+	b.AutoButtonColor = true
+	b.Text = text
+	b.LayoutOrder = order or 0
+	b.Parent = parent
+	round(b, 10)
+	return b
+end
+
+local function panel(parent: Instance, name: string, color: Color3?): Frame
+	local f = Instance.new("Frame")
+	f.Name = name
+	f.BackgroundColor3 = color or PAPER
+	f.BackgroundTransparency = 0.04
+	f.Parent = parent
+	round(f, 14)
+	return f
+end
+
+local function money(n: number): string
+	return "$" .. tostring(math.floor(n + 0.5))
+end
+
+local function stars(avg: number): string
+	if avg <= 0 then
+		return "–"
+	end
+	return string.format("%.1f★", avg)
+end
+
+local function clear(container: Instance)
+	for _, child in container:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+end
+
+-- ---------- root ----------
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "KidSimUI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = playerGui
+
+local menuLabels: { [string]: string } = {}
+
+-- ---------- HUD (top centre) ----------
+
+local hud = panel(gui, "HUD")
+hud.AnchorPoint = Vector2.new(0.5, 0)
+hud.Position = UDim2.new(0.5, 0, 0, 12)
+hud.Size = UDim2.new(0, 0, 0, 48)
+hud.AutomaticSize = Enum.AutomaticSize.X
+hud.Visible = false
+pad(hud, 8)
+list(hud, true, 16).VerticalAlignment = Enum.VerticalAlignment.Center
+
+local function chip(title: string, order: number): TextLabel
+	local c = Instance.new("Frame")
+	c.Name = title
+	c.BackgroundTransparency = 1
+	c.AutomaticSize = Enum.AutomaticSize.XY
+	c.LayoutOrder = order
+	c.Parent = hud
+	list(c, false, 0)
+	label(c, string.upper(title), 11, MUTED, true, 1).AutomaticSize = Enum.AutomaticSize.XY
+	local value = label(c, "–", 20, INK, true, 2)
+	value.AutomaticSize = Enum.AutomaticSize.XY
+	return value
+end
+
+local timeValue = chip("Time", 1)
+local revenueValue = chip("Revenue", 2)
+local starsValue = chip("Stars", 3)
+local scoreValue = chip("Score", 4)
+local stockLine: TextLabel? = nil -- lives in the talk panel, created below
+
+Remotes.get("State").OnClientEvent:Connect(function(state)
+	revenueValue.Text = money(state.revenue)
+	starsValue.Text = stars(state.avgStars)
+	scoreValue.Text = tostring(state.score)
+	local bits = {}
+	for key, count in state.stock do
+		table.insert(bits, (menuLabels[key] or key) .. " " .. tostring(count))
+	end
+	table.sort(bits)
+	if stockLine then
+		stockLine.Text = "Stock left: " .. table.concat(bits, " · ")
+	end
+end)
+
+-- ---------- leaderboard (top right) ----------
+
+local board = panel(gui, "Leaderboard", INK)
+board.AnchorPoint = Vector2.new(1, 0)
+board.Position = UDim2.new(1, -16, 0, 12)
+board.Size = UDim2.new(0, 250, 0, 0)
+board.AutomaticSize = Enum.AutomaticSize.Y
+board.BackgroundTransparency = 0.15
+pad(board, 10)
+list(board, false, 4)
+label(board, "LEADERBOARD", 11, GOLD, true, 0).Size = UDim2.new(1, 0, 0, 14)
+local boardRows = Instance.new("Frame")
+boardRows.Name = "Rows"
+boardRows.BackgroundTransparency = 1
+boardRows.Size = UDim2.new(1, 0, 0, 0)
+boardRows.AutomaticSize = Enum.AutomaticSize.Y
+boardRows.LayoutOrder = 1
+boardRows.Parent = board
+list(boardRows, false, 2)
+
+local function renderBoard(rows: { any })
+	clear(boardRows)
+	for rank, row in rows do
+		local mine = row.userId == player.UserId
+		local text = string.format("%d. %s   %s  %s   %d pts", rank, row.name, money(row.revenue), stars(row.avgStars), row.score)
+		local l = para(boardRows, text, 14, if mine then GOLD else PAPER, mine, rank)
+		l.Font = if mine then Enum.Font.GothamBold else Enum.Font.Gotham
+	end
+	board.Visible = #rows > 0
+end
+Remotes.get("Leaderboard").OnClientEvent:Connect(renderBoard)
+
+-- ---------- toasts ----------
+
+local toastArea = Instance.new("Frame")
+toastArea.AnchorPoint = Vector2.new(0.5, 0)
+toastArea.Position = UDim2.new(0.5, 0, 0, 70)
+toastArea.Size = UDim2.new(0, 420, 0, 120)
+toastArea.BackgroundTransparency = 1
+toastArea.Parent = gui
+list(toastArea, false, 4).HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local toastCount = 0
+Remotes.get("Toast").OnClientEvent:Connect(function(text: string)
+	toastCount += 1
+	local toast = Instance.new("TextLabel")
+	toast.LayoutOrder = toastCount
+	toast.BackgroundColor3 = INK
+	toast.BackgroundTransparency = 0.15
+	toast.TextColor3 = Color3.fromRGB(255, 244, 222)
+	toast.Font = Enum.Font.GothamBold
+	toast.TextSize = 16
+	toast.Text = "  " .. text .. "  "
+	toast.AutomaticSize = Enum.AutomaticSize.XY
+	toast.Parent = toastArea
+	round(toast, 8)
+	task.delay(3, function()
+		TweenService:Create(toast, TweenInfo.new(0.5), { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
+		task.delay(0.5, function()
+			toast:Destroy()
+		end)
+	end)
+end)
+
+-- ---------- conversation (bottom) ----------
+
+local bottom = Instance.new("Frame")
+bottom.Name = "Bottom"
+bottom.AnchorPoint = Vector2.new(0.5, 1)
+bottom.Position = UDim2.new(0.5, 0, 1, -16)
+bottom.Size = UDim2.new(0, 640, 0, 0)
+bottom.AutomaticSize = Enum.AutomaticSize.Y
+bottom.BackgroundTransparency = 1
+bottom.Visible = false
+bottom.Parent = gui
+list(bottom, false, 8).HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local talk = panel(bottom, "Talk")
+talk.Size = UDim2.new(1, 0, 0, 0)
+talk.AutomaticSize = Enum.AutomaticSize.Y
+talk.LayoutOrder = 1
+pad(talk, 14)
+list(talk, false, 6)
+
+local customerTitle = para(talk, "", 15, ACCENT, true, 1)
+customerTitle.Name = "CustomerTitle"
+local customerCue = para(talk, "", 13, MUTED, false, 2)
+customerCue.Name = "CustomerCue"
+
+local log = Instance.new("ScrollingFrame")
+log.Name = "Log"
+log.Size = UDim2.new(1, 0, 0, 120)
+log.BackgroundTransparency = 1
+log.BorderSizePixel = 0
+log.ScrollBarThickness = 4
+log.AutomaticCanvasSize = Enum.AutomaticSize.Y
+log.CanvasSize = UDim2.new(0, 0, 0, 0)
+log.LayoutOrder = 3
+log.Parent = talk
+list(log, false, 4)
+
+local typing = para(talk, "", 13, MUTED, false, 4)
+typing.Name = "Typing"
+stockLine = para(talk, "", 12, MUTED, false, 5)
+
+local logCount = 0
+local function addLine(speaker: string, text: string, kind: string)
+	logCount += 1
+	local line = para(log, "", 17, INK, false, logCount)
+	line.RichText = true
+	local color = if kind == "player" then "#4E70B4" else "#D67C30"
+	local safe = (text:gsub("&", "&amp;"):gsub("<", "&lt;"))
+	line.Text = string.format('<font color="%s"><b>%s</b></font>  %s', color, speaker, safe)
+	task.defer(function()
+		log.CanvasPosition = Vector2.new(0, math.max(0, log.AbsoluteCanvasSize.Y - log.AbsoluteSize.Y))
+	end)
+end
+
+local chatRow = Instance.new("Frame")
+chatRow.Name = "ChatRow"
+chatRow.Size = UDim2.new(1, 0, 0, 42)
+chatRow.BackgroundTransparency = 1
+chatRow.LayoutOrder = 2
+chatRow.Parent = bottom
+list(chatRow, true, 8)
+
+local chatBox = Instance.new("TextBox")
+chatBox.Name = "ChatBox"
+chatBox.Size = UDim2.new(1, -196, 1, 0)
+chatBox.BackgroundColor3 = PAPER_DIM
+chatBox.Font = Enum.Font.Gotham
+chatBox.TextSize = 16
+chatBox.TextColor3 = INK
+chatBox.PlaceholderText = "Talk to your customer..."
+chatBox.Text = ""
+chatBox.ClearTextOnFocus = false
+chatBox.LayoutOrder = 1
+chatBox.Parent = chatRow
+round(chatBox, 10)
+pad(chatBox, 6)
+
+local sendButton = button(chatRow, "ReplyButton", "Reply", INK, PAPER, 2)
+sendButton.Size = UDim2.new(0, 90, 1, 0)
+local hintButton = button(chatRow, "CoachButton", "Coach", COACH, Color3.fromRGB(255, 255, 255), 3)
+hintButton.Size = UDim2.new(0, 90, 1, 0)
+
+local hasCustomer = false
+local function sendChat()
+	local text = chatBox.Text
+	if #text:gsub("%s", "") == 0 or not hasCustomer then
+		return
+	end
+	chatBox.Text = ""
+	Remotes.get("Say"):FireServer(text)
+end
+sendButton.Activated:Connect(sendChat)
+chatBox.FocusLost:Connect(function(enterPressed)
+	if enterPressed then
+		sendChat()
+	end
+end)
+hintButton.Activated:Connect(function()
+	if hasCustomer then
+		Remotes.get("RequestHint"):FireServer()
+	end
+end)
+
+Remotes.get("Customer").OnClientEvent:Connect(function(visible)
+	clear(log)
+	logCount = 0
+	typing.Text = ""
+	if visible then
+		hasCustomer = true
+		customerTitle.Text = visible.name
+		local article = if string.find("aeiou", string.sub(visible.ageGroup, 1, 1), 1, true) then "An" else "A"
+		customerCue.Text = string.format("%s %s customer, %s.", article, visible.ageGroup, visible.situation)
+	else
+		hasCustomer = false
+		customerTitle.Text = "Next customer coming..."
+		customerCue.Text = ""
+	end
+end)
+
+Remotes.get("Dialogue").OnClientEvent:Connect(function(speaker: string, text: string, kind: string?)
+	addLine(speaker, text, kind or "npc")
+end)
+
+Remotes.get("Busy").OnClientEvent:Connect(function(busy: boolean, who: string?)
+	typing.Text = if busy then (who or "They") .. " is thinking..." else ""
+end)
+
+-- ---------- coach bubble ----------
+
+local coachBubble = panel(gui, "CoachBubble", COACH)
+coachBubble.AnchorPoint = Vector2.new(1, 1)
+coachBubble.Position = UDim2.new(1, -16, 1, -24)
+coachBubble.Size = UDim2.new(0, 280, 0, 0)
+coachBubble.AutomaticSize = Enum.AutomaticSize.Y
+coachBubble.Visible = false
+pad(coachBubble, 12)
+list(coachBubble, false, 4)
+label(coachBubble, "COACH", 11, Color3.fromRGB(205, 220, 255), true, 1).AutomaticSize = Enum.AutomaticSize.XY
+local coachText = para(coachBubble, "", 15, Color3.fromRGB(255, 255, 255), false, 2)
+
+local coachHideThread: thread? = nil
+Remotes.get("CoachHint").OnClientEvent:Connect(function(hint: string)
+	coachText.Text = hint
+	coachBubble.Visible = true
+	if coachHideThread then
+		task.cancel(coachHideThread)
+	end
+	coachHideThread = task.delay(10, function()
+		coachBubble.Visible = false
+	end)
+end)
+
+-- ---------- overlays ----------
+
+local function makeOverlay(name: string): Frame
+	local overlay = Instance.new("Frame")
+	overlay.Name = name
+	overlay.Size = UDim2.fromScale(1, 1)
+	overlay.BackgroundColor3 = Color3.fromRGB(24, 22, 20)
+	overlay.BackgroundTransparency = 0.12
+	overlay.Visible = false
+	overlay.ZIndex = 5
+	overlay.Parent = gui
+	return overlay
+end
+
+local function card(parent: Instance, name: string, width: number, scrolling: boolean): GuiObject
+	local c: GuiObject
+	if scrolling then
+		local s = Instance.new("ScrollingFrame")
+		s.ScrollBarThickness = 6
+		s.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		s.CanvasSize = UDim2.new(0, 0, 0, 0)
+		s.Size = UDim2.new(0, width, 0.86, 0)
+		c = s
+	else
+		local f = Instance.new("Frame")
+		f.Size = UDim2.new(0, width, 0, 0)
+		f.AutomaticSize = Enum.AutomaticSize.Y
+		c = f
+	end
+	c.Name = name
+	c.AnchorPoint = Vector2.new(0.5, 0.5)
+	c.Position = UDim2.fromScale(0.5, 0.5)
+	c.BackgroundColor3 = PAPER
+	c.ZIndex = 6
+	c.Parent = parent
+	round(c, 16)
+	pad(c, 24)
+	list(c, false, 10)
+	return c
+end
+
+-- Lobby
+local lobbyOverlay = makeOverlay("LobbyOverlay")
+local lobbyCard = card(lobbyOverlay, "LobbyCard", 580, false)
+para(lobbyCard, "KIDSIM — ISAAC SIM FOR CHILDREN", 12, ACCENT, true, 1)
+local lobbyTitle = para(lobbyCard, "", 32, INK, true, 2)
+local lobbyThesis = para(lobbyCard, "", 18, SOFT, true, 3)
+local lobbyBriefing = para(lobbyCard, "", 16, INK, false, 4)
+local lobbyMenu = para(lobbyCard, "", 14, SOFT, false, 5)
+local lobbyLane = para(lobbyCard, "", 14, ACCENT, true, 6)
+local startButton = button(lobbyCard, "StartButton", "Start the round", ACCENT, Color3.fromRGB(255, 255, 255), 7)
+startButton.Size = UDim2.new(1, 0, 0, 46)
+startButton.Activated:Connect(function()
+	Remotes.get("StartRound"):FireServer()
+end)
+
+-- Waiting banner (joined mid-round or all counters full)
+local waitingBanner = panel(gui, "WaitingBanner", INK)
+waitingBanner.AnchorPoint = Vector2.new(0.5, 1)
+waitingBanner.Position = UDim2.new(0.5, 0, 1, -24)
+waitingBanner.Size = UDim2.new(0, 460, 0, 0)
+waitingBanner.AutomaticSize = Enum.AutomaticSize.Y
+waitingBanner.Visible = false
+pad(waitingBanner, 12)
+list(waitingBanner, false, 0)
+local waitingText = para(waitingBanner, "", 16, PAPER, true, 1)
+waitingText.TextXAlignment = Enum.TextXAlignment.Center
+
+-- Countdown / closing
+local bigOverlay = makeOverlay("BigOverlay")
+bigOverlay.BackgroundTransparency = 0.45
+local bigText = label(bigOverlay, "", 64, PAPER, true)
+bigText.ZIndex = 6
+bigText.AnchorPoint = Vector2.new(0.5, 0.5)
+bigText.Position = UDim2.fromScale(0.5, 0.5)
+bigText.Size = UDim2.new(0, 700, 0, 200)
+bigText.TextXAlignment = Enum.TextXAlignment.Center
+
+-- Debrief / results
+local debriefOverlay = makeOverlay("DebriefOverlay")
+local debriefCard = card(debriefOverlay, "DebriefCard", 660, true)
+
+local function setZ(container: Instance)
+	for _, d in container:GetDescendants() do
+		if d:IsA("GuiObject") then
+			d.ZIndex = 6
+		end
+	end
+end
+setZ(lobbyCard)
+
+Remotes.get("Debrief").OnClientEvent:Connect(function(payload)
+	clear(debriefCard)
+	local order = 0
+	local function nextOrder(): number
+		order += 1
+		return order
+	end
+	local function line(text: string, size: number, color: Color3?, bold: boolean?): TextLabel
+		return para(debriefCard, text, size, color, bold, nextOrder())
+	end
+
+	line("ROUND RESULTS — " .. string.upper(payload.title or "KidSim"), 12, ACCENT, true)
+	local boardRows = payload.leaderboard or {}
+	if payload.rank then
+		line(string.format("You placed #%d of %d", payload.rank, #boardRows), 30, INK, true)
+	else
+		line("This round's results", 30, INK, true)
+	end
+
+	line("LEADERBOARD", 12, MUTED, true)
+	for rank, row in boardRows do
+		local mine = row.userId == player.UserId
+		local l = line(
+			string.format("%d. %-14s %6s   %s   %d served   %d pts", rank, row.name, money(row.revenue), stars(row.avgStars), row.served, row.score),
+			16,
+			if mine then ACCENT else INK,
+			mine
+		)
+		l.Font = Enum.Font.Code
+	end
+
+	local stats = payload.stats
+	if stats then
+		line("YOUR COUNTER", 12, MUTED, true)
+		local capture = if stats.walletSeen > 0 then math.floor(stats.revenue / stats.walletSeen * 100 + 0.5) else 0
+		line(string.format("You earned %s of the %s your customers had in their wallets (%d%%).", money(stats.revenue), money(stats.walletSeen), capture), 18, INK, true)
+		line(string.format("Average happiness %s  ·  score %d = revenue + happiness bonus", stars(stats.avgStars), stats.score), 15, SOFT, false)
+
+		for _, r in (payload.records or {}) do
+			local bought = {}
+			for key, qty in r.items do
+				table.insert(bought, tostring(qty) .. " " .. (menuLabels[key] or key))
+			end
+			local what = if #bought > 0 then table.concat(bought, ", ") else "nothing"
+			local starText = string.rep("★", r.stars) .. string.rep("☆", 5 - r.stars)
+			line(
+				string.format("%s (%s, had %s) — bought %s for %s   %s", r.customer, r.ageGroup, money(r.wallet), what, money(r.paid), starText),
+				14,
+				if r.stars >= 4 then GOOD elseif r.stars <= 2 then BAD else INK,
+				false
+			)
+		end
+
+		local evaluation = payload.evaluation or {}
+		line("SKILLS YOU PRACTICED", 12, MUTED, true)
+		for _, skill in (evaluation.skills or {}) do
+			line("● " .. (skill.name or skill.tag or "?"), 18, INK, true)
+			local evidence = line(skill.evidence or "", 15, SOFT, false)
+			local indent = Instance.new("UIPadding")
+			indent.PaddingLeft = UDim.new(0, 18)
+			indent.Parent = evidence
+		end
+		if evaluation.wentWell and #evaluation.wentWell > 0 then
+			line("WHAT WENT WELL", 12, GOOD, true)
+			for _, item in evaluation.wentWell do
+				line("+ " .. item, 15, INK, false)
+			end
+		end
+		if evaluation.wentWrong and #evaluation.wentWrong > 0 then
+			line("WHAT TO WATCH", 12, BAD, true)
+			for _, item in evaluation.wentWrong do
+				line("– " .. item, 15, INK, false)
+			end
+		end
+		line("IN THE REAL WORLD", 12, MUTED, true)
+		line(evaluation.realWorldTransfer or "", 19, INK, true)
+		line("NEXT DRILL", 12, MUTED, true)
+		line(evaluation.nextDrill or "", 17, INK, false)
+		line(payload.thesis or "", 14, ACCENT, true)
+	end
+
+	local again = button(debriefCard, "AgainButton", "Back to the lobby", INK, PAPER, nextOrder())
+	again.Size = UDim2.new(1, 0, 0, 44)
+	again.Activated:Connect(function()
+		Remotes.get("Continue"):FireServer()
+	end)
+	setZ(debriefCard)
+	;(debriefCard :: ScrollingFrame).CanvasPosition = Vector2.new(0, 0)
+
+	bigOverlay.Visible = false
+	debriefOverlay.Visible = true
+end)
+
+-- ---------- timer ----------
+
+Remotes.get("Timer").OnClientEvent:Connect(function(seconds: number, kind: string)
+	if kind == "countdown" then
+		bigText.Text = tostring(seconds)
+	else
+		timeValue.Text = string.format("%d:%02d", seconds // 60, seconds % 60)
+		timeValue.TextColor3 = if seconds <= 20 then BAD else INK
+	end
+end)
+
+-- ---------- phase routing ----------
+
+local function hideAll()
+	lobbyOverlay.Visible = false
+	bigOverlay.Visible = false
+	debriefOverlay.Visible = false
+	waitingBanner.Visible = false
+	bottom.Visible = false
+	coachBubble.Visible = false
+	hud.Visible = false
+end
+
+local function applyLobby(payload)
+	for _, item in (payload.menu or {}) do
+		menuLabels[item.key] = item.label
+	end
+	lobbyTitle.Text = payload.title or ""
+	lobbyThesis.Text = "“" .. (payload.thesis or "") .. "”"
+	lobbyBriefing.Text = payload.briefing or ""
+	local menuBits = {}
+	for _, item in (payload.menu or {}) do
+		table.insert(menuBits, item.label .. " " .. money(item.price))
+	end
+	lobbyMenu.Text = "Menu: " .. table.concat(menuBits, " · ") .. string.format("   ·   Round: %d min", (payload.roundSeconds or 180) // 60)
+	if payload.lane then
+		lobbyLane.Text = string.format("Your counter: #%d. Anyone can start the round for everyone.", payload.lane)
+		startButton.Visible = true
+	else
+		lobbyLane.Text = "All counters are taken — you're watching this time."
+		startButton.Visible = false
+	end
+end
+
+Remotes.get("Phase").OnClientEvent:Connect(function(phase: string, payload)
+	if phase == "lobby" then
+		hideAll()
+		applyLobby(payload)
+		lobbyOverlay.Visible = true
+	elseif phase == "waiting" then
+		applyLobby(payload)
+		lobbyOverlay.Visible = false
+		bottom.Visible = false
+		hud.Visible = false
+		waitingText.Text = if payload.lanesFull
+			then "All counters are taken — watching the leaderboard."
+			else "A round is in progress. You'll get a counter next round!"
+		waitingBanner.Visible = not debriefOverlay.Visible
+	elseif phase == "countdown" then
+		hideAll()
+		hud.Visible = true
+		revenueValue.Text, starsValue.Text, scoreValue.Text = "$0", "–", "0"
+		bigText.Text = "Get ready..."
+		bigText.TextSize = 72
+		bigOverlay.Visible = true
+	elseif phase == "running" then
+		hideAll()
+		hud.Visible = true
+		bottom.Visible = true
+		hasCustomer = false
+		customerTitle.Text = "Next customer coming..."
+		customerCue.Text = ""
+		clear(log)
+	elseif phase == "closing" then
+		bottom.Visible = false
+		coachBubble.Visible = false
+		hasCustomer = false
+		bigText.Text = "Time's up!\nYour coach is writing your debrief."
+		bigText.TextSize = 30
+		bigOverlay.Visible = true
+	end
+end)
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
