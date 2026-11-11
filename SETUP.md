@@ -51,8 +51,8 @@ Press **Play** in Studio. In the Output window you should see:
 [KidSim] LLM configured: true
 ```
 
-Click **Start the round**, type anything to the first customer, and a model-written
-reply should appear within a couple of seconds. If the model is unreachable you
+Click **Open the cafe**; within a few seconds your staff walk in and start talking
+with the first customers (speech bubbles, read aloud). If the model is unreachable you
 get scripted fallback lines and a warning in Output — the shift still completes.
 
 Key-safety check: the key exists only in the Creator Hub secret store and/or
@@ -61,6 +61,6 @@ Key-safety check: the key exists only in the Creator Hub secret store and/or
 
 ## 6. Record the demo
 
-90 seconds, English: thesis card → round start with a friend → persuading a random customer (coach hint once) → results + debrief.
+90 seconds, English: thesis card → open the cafe → a staff member asks you at the throne → a rule break, warn, fire → results + who your staff really were.
 The debrief shows the real numbers from the round just played. For a two-player
 recording use Studio's Test → Clients and Servers (2 players) or two devices.

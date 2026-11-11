@@ -16,24 +16,29 @@ return {
 
 	-- LLM budgets
 	MAX_TOKENS_CUSTOMER = 220, -- JSON turn: say + decision + items
-	MAX_TOKENS_EVALUATION = 700,
+	MAX_TOKENS_STAFF = 200, -- JSON turn: say + action (+ question)
+	MAX_TOKENS_EVALUATION = 800,
 
 	-- Round
 	ROUND_SECONDS = 180,
 	COUNTDOWN_SECONDS = 3,
-	MAX_LANES = 4,
+	MAX_SHOPS = 4, -- one shop per player
 
-	-- Customers
-	CUSTOMER_IDLE_SECONDS = 35, -- customer gives up if the shopkeeper says nothing
-	GAP_BETWEEN_CUSTOMERS = 1.5,
-	COACH_HINTS_PER_CUSTOMER = 1,
+	-- Staff
+	STAFF_PER_SHOP = 3,
+	HIRE_DELAY_SECONDS = 8, -- empty counter after a firing
+	HIRE_FEE = 5, -- score cost of every new hire after the first team
+	OWNER_ANSWER_SECONDS = 20, -- staff wait this long at the throne, then decide alone
+	GAP_BETWEEN_CUSTOMERS = 2,
 
-	-- Score = revenue + STARS_WEIGHT * sum(stars - 3).
-	-- A pushy sale that leaves a 1-star customer costs $4 of score.
+	-- Score = revenue - hiring fees + STARS_WEIGHT * sum(stars - 3).
 	STARS_WEIGHT = 2,
-	-- Word of mouth: the lane's average stars scale the next customer's wallet.
-	-- 3 stars = x1.0, each star above/below = +/- BUZZ_PER_STAR, clamped.
+	-- Word of mouth: a shop's average stars scale the next customer's wallet.
 	BUZZ_PER_STAR = 0.15,
 	BUZZ_MIN = 0.7,
 	BUZZ_MAX = 1.3,
+
+	-- Text-to-speech voices (AudioTextToSpeech.VoiceId), English only so the
+	-- spoken line matches the bubble.
+	TTS_VOICES = { "1", "2", "3", "4", "5", "6", "7", "8" },
 }

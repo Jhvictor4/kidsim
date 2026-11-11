@@ -1,9 +1,10 @@
 --!strict
--- The three personas: customer (a generated agent that decides what to buy
--- and how happy it is), coach (one hint, never the answer), evaluator
--- (structured debrief JSON). All prompt text comes from the pack — this
--- module stays pack-agnostic. Everything the customer "decides" is only a
--- proposal: LaneEngine validates it against menu, stock and wallet.
+-- The personas: customer (decides what to buy and how happy it is), staff
+-- (serves the customer under the owner's rules and its hidden personality,
+-- and may walk over to ask the owner), evaluator (structured debrief JSON).
+-- All prompt text comes from the pack — this module stays pack-agnostic.
+-- Everything an agent "decides" is only a proposal: ShopEngine validates
+-- it against menu, stock, wallet and the owner's rules.
 
 local HttpService = game:GetService("HttpService")
 
@@ -13,8 +14,9 @@ local Types = require(game.ReplicatedStorage.Shared.Types)
 
 type Pack = Types.Pack
 type CustomerProfile = Types.CustomerProfile
+type StaffProfile = Types.StaffProfile
 type CustomerTurn = Types.CustomerTurn
-type SaleRecord = Types.SaleRecord
+type StaffTurn = Types.StaffTurn
 type Evaluation = Types.Evaluation
 
 local AgentRuntime = {}
@@ -53,50 +55,51 @@ local function clip(text: string, limit: number): string
 	return text
 end
 
+local function trim(text: string): string
+	return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 -- ========== Customer ==========
 
--- The stage direction that makes the customer speak first. LaneEngine seeds
--- the conversation history with it so later turns start with a user message
--- (some chat templates reject an assistant-first history).
+-- Stage direction that makes the customer speak first. ShopEngine seeds the
+-- customer's history with it so later turns start with a user message.
 AgentRuntime.OPENING_PROMPT =
-	"(You just walked up to the counter. Greet the shopkeeper and say roughly what you're in the mood for, in character. decision must be \"stay\".)"
+	"(You just walked up to the counter. Greet the staff member and say roughly what you're in the mood for, in character. decision must be \"stay\".)"
 
 local CUSTOMER_SCHEMA = [[Every reply must be ONLY a JSON object, no prose around it:
 {"say": "what you say out loud (1-2 short sentences)",
  "decision": "stay" | "buy" | "leave",
  "items": {"menu_key": quantity, ...},
  "pay": total dollars you hand over,
- "stars": 1-5}
+ "stars": 1-5,
+ "complaint": "only if stars <= 2: a few words on why"}
 - "stay": keep talking. items/pay/stars are ignored.
 - "buy": you take exactly "items" and pay "pay", then you leave. "say" is your goodbye line.
   "items" must list EVERY item you take, with the exact menu keys (e.g. {"hotchoc": 1, "cookie": 1}).
-  "pay" is the total you agreed on (a discount the shopkeeper offered counts).
+  "pay" is the total you agreed on (a discount the staff member gave counts).
 - "leave": you walk away without buying. "say" is your goodbye line.
-- "stars" (on buy or leave): how you'd rate this shopkeeper to a friend. 5 = felt understood and well treated, 3 = fine, 1 = pushed, tricked or ignored.]]
+- "stars" (on buy or leave): how you'd rate this cafe's service to a friend. 5 = felt understood and well treated, 3 = fine, 1 = pushed, tricked, rushed or treated rudely.]]
 
 local function customerSystem(pack: Pack, profile: CustomerProfile, repliesLeft: number): string
-	local lastCall = ""
-	if repliesLeft <= 0 then
-		lastCall = "This is your LAST reply: decision MUST be \"buy\" or \"leave\" now."
-	else
-		lastCall = string.format(
-			"You will listen to the shopkeeper for at most %d more replies before you decide. You may buy earlier if you're happy.",
+	local lastCall = if repliesLeft <= 0
+		then "This is your LAST reply: decision MUST be \"buy\" or \"leave\" now."
+		else string.format(
+			"You will listen to the staff member for at most %d more replies before you decide. You may buy earlier if you're happy.",
 			repliesLeft
 		)
-	end
 	return table.concat({
 		pack.cast.customerBase,
 		string.format("You are %s, a %s customer. Right now you are %s.", profile.name, profile.ageGroup, profile.situation),
-		"What actually tempts you (keep it private unless asked about what you like): " .. profile.taste .. ".",
+		"What actually tempts you (keep it private unless asked): " .. profile.taste .. ".",
 		"How you feel about money and selling: " .. profile.sensitivity.prompt,
 		string.format(
-			"You have exactly $%d in your wallet. This is private: don't announce it, but you may hint ('I don't have much on me') or tell if asked kindly. You can NEVER spend more than $%d.",
+			"You have exactly $%d in your wallet. This is private: don't announce it, but you may hint or tell if asked kindly. You can NEVER spend more than $%d.",
 			profile.wallet,
 			profile.wallet
 		),
 		"Menu: " .. menuText(pack) .. ".",
-		"Prices: you never pay MORE than the menu price for what you take. You may accept a fair discount the shopkeeper offers. If they try to overcharge, lie, or keep pushing after you said no, you get annoyed and may leave with low stars.",
-		"You are persuadable by good selling: if the shopkeeper asks what you need and suggests something that really fits your situation and taste, you are happy to buy it (and maybe one more thing), as long as it fits your wallet.",
+		"You never pay MORE than the menu price. You may accept a discount the staff member offers. If they are pushy, rude, dishonest or keep pushing after you said no, you get annoyed and give low stars.",
+		"Good service (asking what you need, suggesting something that fits, being kind) makes you happy to buy.",
 		lastCall,
 		CUSTOMER_SCHEMA,
 	}, "\n\n")
@@ -105,9 +108,7 @@ end
 local function parseCustomer(raw: string): CustomerTurn
 	local data = decodeObject(raw)
 	if not data then
-		-- the model answered in plain text: treat it as a line of dialogue
-		local text = raw:gsub("^%s+", ""):gsub("%s+$", "")
-		return { say = clip(text, 280), decision = "stay", items = {}, pay = 0, stars = 3 }
+		return { say = clip(trim(raw), 280), decision = "stay", items = {}, pay = 0, stars = 3 }
 	end
 	local items: { [string]: number } = {}
 	if typeof(data.items) == "table" then
@@ -128,11 +129,11 @@ local function parseCustomer(raw: string): CustomerTurn
 		items = items,
 		pay = tonumber(data.pay) or -1, -- -1 = "menu price"
 		stars = math.clamp(math.floor(tonumber(data.stars) or 3), 1, 5),
+		complaint = if typeof(data.complaint) == "string" and #data.complaint > 0 then clip(data.complaint, 80) else nil,
 	}
 end
 
--- `history` holds prior turns: user = shopkeeper lines, assistant = the
--- customer's raw JSON replies. Pass an empty history for the opening line.
+-- `history`: user = staff lines, assistant = the customer's raw JSON replies.
 function AgentRuntime.customerTurn(
 	pack: Pack,
 	profile: CustomerProfile,
@@ -162,7 +163,6 @@ function AgentRuntime.customerTurn(
 		end
 		return true, turn, reply
 	end
-	-- model unreachable: keep the scene alive, let patience run out naturally
 	local fallback: CustomerTurn = {
 		say = if #history == 0 then "Hi! Hmm, what's good here today?" else "Hmm, let me think about that...",
 		decision = if repliesLeft <= 0 then "leave" else "stay",
@@ -173,32 +173,108 @@ function AgentRuntime.customerTurn(
 	return false, fallback, HttpService:JSONEncode(fallback)
 end
 
--- ========== Coach ==========
+-- ========== Staff ==========
 
-function AgentRuntime.coachHint(pack: Pack, profile: CustomerProfile, transcript: { string }): string
-	local system = table.concat({
-		pack.cast.coach,
-		string.format("Customer the kid can see: %s, a %s, %s.", profile.name, profile.ageGroup, profile.situation),
-		"Menu: " .. menuText(pack) .. ".",
-		"Conversation so far:\n" .. (if #transcript > 0 then table.concat(transcript, "\n") else "(nothing yet)"),
-	}, "\n\n")
+local STAFF_SCHEMA = [[Every reply must be ONLY a JSON object, no prose around it:
+{"say": "what you say to the customer now (1-2 short sentences)",
+ "action": "talk" | "ask_owner",
+ "question": "only for ask_owner: short question for the owner",
+ "options": ["only for ask_owner: 2-3 short answers the owner can pick"]}
+- "talk": you just say "say" to the customer.
+- "ask_owner": "say" is what you tell the customer before walking over (e.g. "Let me check with my boss!"); then you walk to the owner's throne and wait for an answer.]]
 
-	local ok, reply = LlmClient.chat({
-		{ role = "system", content = system },
-		{ role = "user", content = "Give me one short hint." },
-	}, { maxTokens = 90, temperature = 0.6 })
+export type StaffContext = {
+	rules: { string }, -- the owner's current rules, as instructions
+	feedback: { string }, -- praise / warnings from the owner so far
+	customer: CustomerProfile,
+	alreadyAsked: boolean,
+}
 
-	if ok then
-		return clip(reply, 220)
+local function staffSystem(pack: Pack, staff: StaffProfile, ctx: StaffContext): string
+	local parts = {
+		pack.cast.staffBase,
+		string.format("You are %s. Your real personality (stay true to it, even when it breaks the rules): %s", staff.name, staff.personality.prompt),
+		"The owner's house rules right now:\n- " .. table.concat(ctx.rules, "\n- "),
+	}
+	if #ctx.feedback > 0 then
+		table.insert(parts, "What the owner has told you about your work:\n- " .. table.concat(ctx.feedback, "\n- "))
 	end
-	return "Ask them one question about what they need right now, then suggest something that fits."
+	table.insert(parts, "Menu: " .. menuText(pack) .. ". You cannot see the customer's wallet.")
+	table.insert(parts, string.format(
+		"The customer in front of you: %s, a %s customer, %s.",
+		ctx.customer.name,
+		ctx.customer.ageGroup,
+		ctx.customer.situation
+	))
+	if ctx.alreadyAsked then
+		table.insert(parts, "You already asked the owner during this visit. Do not ask again; use \"talk\".")
+	else
+		table.insert(parts, "Only use \"ask_owner\" when the rules say to ask, or when you are truly unsure.")
+	end
+	table.insert(parts, STAFF_SCHEMA)
+	return table.concat(parts, "\n\n")
+end
+
+local function parseStaff(raw: string): StaffTurn
+	local data = decodeObject(raw)
+	if not data then
+		return { say = clip(trim(raw), 280), action = "talk", options = {} }
+	end
+	local options = {}
+	if typeof(data.options) == "table" then
+		for _, opt in data.options do
+			if typeof(opt) == "string" and #opt > 0 and #options < 3 then
+				table.insert(options, clip(opt, 60))
+			end
+		end
+	end
+	local action = if typeof(data.action) == "string" and string.lower(data.action) == "ask_owner" then "ask_owner" else "talk"
+	local question = if typeof(data.question) == "string" and #data.question > 0 then clip(data.question, 160) else nil
+	if action == "ask_owner" and (question == nil or #options < 2) then
+		action = "talk" -- a question without choices can't be answered by a button
+	end
+	return {
+		say = clip(typeof(data.say) == "string" and data.say or "...", 280),
+		action = action,
+		question = question,
+		options = options,
+	}
+end
+
+-- `history`: user = customer lines / owner answers, assistant = the staff's raw JSON.
+function AgentRuntime.staffTurn(
+	pack: Pack,
+	staff: StaffProfile,
+	ctx: StaffContext,
+	history: { LlmClient.ChatMessage }
+): (boolean, StaffTurn, string)
+	local messages: { LlmClient.ChatMessage } = {
+		{ role = "system", content = staffSystem(pack, staff, ctx) },
+	}
+	for _, msg in history do
+		table.insert(messages, msg)
+	end
+	local ok, reply = LlmClient.chat(messages, {
+		maxTokens = Config.MAX_TOKENS_STAFF,
+		temperature = 0.8,
+		jsonMode = true,
+	})
+	if ok then
+		local turn = parseStaff(reply)
+		if ctx.alreadyAsked then
+			turn.action = "talk"
+		end
+		return true, turn, reply
+	end
+	local fallback: StaffTurn = { say = "What can I get you today?", action = "talk", options = {} }
+	return false, fallback, HttpService:JSONEncode(fallback)
 end
 
 -- ========== Evaluator ==========
 
 local EVAL_SCHEMA = [[Reply with ONLY a JSON object, no prose, no markdown fences, exactly this shape:
 {
-  "skills": [{"tag": "skill_tag", "name": "Plain-English skill name", "evidence": "one sentence citing a real customer and what the player did"}],
+  "skills": [{"tag": "skill_tag", "name": "Plain-English skill name", "evidence": "one sentence citing a real moment"}],
   "wentWell": ["short bullet", "..."],
   "wentWrong": ["short bullet", "..."],
   "realWorldTransfer": "one sentence: where the child will use this in their own life",
@@ -245,37 +321,27 @@ local function tryParseEvaluation(raw: string): Evaluation?
 	}
 end
 
-local function fallbackEvaluation(records: { SaleRecord }): Evaluation
+local function fallbackEvaluation(record: { [string]: any }): Evaluation
 	local wentWell, wentWrong = {}, {}
-	for _, r in records do
-		if r.outcome == "bought" and r.stars >= 4 then
-			table.insert(wentWell, string.format("%s paid $%d and left happy (%d stars).", r.customer, r.paid, r.stars))
-		elseif r.stars <= 2 then
-			table.insert(wentWrong, string.format("%s left with %d stars.", r.customer, r.stars))
+	for _, s in (record.staff or {}) do
+		if s.ruleBreaks > 0 and not s.fired then
+			table.insert(wentWrong, string.format("%s broke your rules %d times and kept working.", s.name, s.ruleBreaks))
+		elseif s.ruleBreaks > 0 and s.fired then
+			table.insert(wentWell, string.format("You noticed %s breaking the rules and acted.", s.name))
 		end
 	end
 	return {
 		skills = {
-			{ tag = "customer_service", name = "Serving customers", evidence = string.format("You talked with %d customers this round.", #records) },
+			{ tag = "setting_clear_rules", name = "Running a team", evidence = "You set the house rules and watched your staff work." },
 		},
 		wentWell = wentWell,
 		wentWrong = wentWrong,
-		realWorldTransfer = "Next time you sell something at a school fair or trade with a friend, ask what they need before you suggest anything.",
-		nextDrill = "Ask every customer one question about what they need before you suggest an item.",
+		realWorldTransfer = "Next time you lead a group project, agree on the rules first and check who actually follows them.",
+		nextDrill = "Answer every staff question within a few seconds next round.",
 	}
 end
 
-function AgentRuntime.evaluate(pack: Pack, records: { SaleRecord }, summary: { [string]: any }): Evaluation
-	if #records == 0 then
-		return {
-			skills = {},
-			wentWell = {},
-			wentWrong = { "No customer finished a conversation this round." },
-			realWorldTransfer = "Selling starts with saying hello and asking what someone needs.",
-			nextDrill = "Greet the very first customer and ask what they're in the mood for.",
-		}
-	end
-
+function AgentRuntime.evaluate(pack: Pack, record: { [string]: any }): Evaluation
 	local system = table.concat({
 		pack.cast.evaluator,
 		"Skill tags available for this scenario: " .. table.concat(pack.skillTags, ", "),
@@ -283,15 +349,9 @@ function AgentRuntime.evaluate(pack: Pack, records: { SaleRecord }, summary: { [
 		EVAL_SCHEMA,
 	}, "\n\n")
 
-	local payload = HttpService:JSONEncode({
-		scenario = pack.title,
-		summary = summary,
-		customers = records,
-	})
-
 	local messages: { LlmClient.ChatMessage } = {
 		{ role = "system", content = system },
-		{ role = "user", content = "Here is the full round record. Evaluate it.\n" .. payload },
+		{ role = "user", content = "Here is the full round record. Evaluate it.\n" .. HttpService:JSONEncode(record) },
 	}
 
 	for attempt = 1, 2 do
@@ -315,7 +375,7 @@ function AgentRuntime.evaluate(pack: Pack, records: { SaleRecord }, summary: { [
 	end
 
 	warn("[KidSim] Evaluator fell back to deterministic debrief")
-	return fallbackEvaluation(records)
+	return fallbackEvaluation(record)
 end
 
 return AgentRuntime

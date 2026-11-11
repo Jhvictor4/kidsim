@@ -1,13 +1,17 @@
 --!strict
--- Random customer generator. Rolls a hidden profile (wallet, taste, price
--- attitude, patience) plus a visible cue (age, situation) from the pack's
--- CustomerSpec. Pack-agnostic: it only reads the spec.
+-- Random people generator. Rolls customers (hidden wallet, taste, price
+-- attitude, patience + a visible cue) and staff (hidden personality) from
+-- the pack's specs, each with its own text-to-speech voice. Pack-agnostic.
 
 local Types = require(game.ReplicatedStorage.Shared.Types)
+local Config = require(script.Parent.Config)
 
 type Pack = Types.Pack
 type CustomerProfile = Types.CustomerProfile
+type StaffProfile = Types.StaffProfile
 type AgeGroup = Types.AgeGroup
+type Personality = Types.Personality
+type Voice = Types.Voice
 
 local CustomerGen = {}
 
@@ -17,42 +21,43 @@ local function pick<T>(rng: Random, list: { T }): T
 	return list[rng:NextInteger(1, #list)]
 end
 
-local function pickWeighted(rng: Random, groups: { AgeGroup }): AgeGroup
+local function pickWeighted<T>(rng: Random, items: { T }, weightOf: (T) -> number): T
 	local total = 0
-	for _, group in groups do
-		total += group.weight
+	for _, item in items do
+		total += weightOf(item)
 	end
 	local roll = rng:NextNumber() * total
-	for _, group in groups do
-		roll -= group.weight
+	for _, item in items do
+		roll -= weightOf(item)
 		if roll <= 0 then
-			return group
+			return item
 		end
 	end
-	return groups[#groups]
+	return items[#items]
+end
+
+local PITCH_BY_AGE: { [string]: number } = { kid = 5, teen = 2, adult = 0, senior = -2 }
+
+local function rollVoice(rng: Random, ageGroup: string?): Voice
+	local base = PITCH_BY_AGE[ageGroup or "adult"] or 0
+	return {
+		voiceId = pick(rng, Config.TTS_VOICES),
+		pitch = math.clamp(base + rng:NextNumber(-1.5, 1.5), -12, 12),
+		speed = rng:NextNumber(0.95, 1.15),
+	}
 end
 
 -- `buzz` scales the wallet (word of mouth from earlier customers' stars).
--- `avoidName` keeps the same name from appearing twice in a row.
-function CustomerGen.generate(pack: Pack, rng: Random, buzz: number, avoidName: string?): CustomerProfile
+function CustomerGen.customer(pack: Pack, rng: Random, buzz: number): CustomerProfile
 	local spec = pack.customers
-	local age = pickWeighted(rng, spec.ageGroups)
-
-	local name = pick(rng, spec.names)
-	for _ = 1, 4 do
-		if name ~= avoidName then
-			break
-		end
-		name = pick(rng, spec.names)
-	end
-
-	local baseWallet = rng:NextInteger(age.budgetMin, age.budgetMax)
-	local wallet = math.max(1, math.floor(baseWallet * buzz + 0.5))
-
+	local age = pickWeighted(rng, spec.ageGroups, function(g: AgeGroup)
+		return g.weight
+	end)
+	local wallet = math.max(1, math.floor(rng:NextInteger(age.budgetMin, age.budgetMax) * buzz + 0.5))
 	nextId += 1
 	return {
 		id = nextId,
-		name = name,
+		name = pick(rng, spec.names),
 		look = pick(rng, spec.looks),
 		ageGroup = age.label,
 		situation = pick(rng, spec.situations),
@@ -60,16 +65,39 @@ function CustomerGen.generate(pack: Pack, rng: Random, buzz: number, avoidName: 
 		sensitivity = pick(rng, spec.sensitivities),
 		wallet = wallet,
 		patience = rng:NextInteger(spec.patienceMin, spec.patienceMax),
+		voice = rollVoice(rng, age.label),
 	}
 end
 
--- The only slice of a profile the client is allowed to see.
-function CustomerGen.visible(profile: CustomerProfile): { [string]: any }
+-- `taken` = names already on the team; `avoidLabels` = personalities to skip
+-- (used to guarantee the first team has at least one problem staff member).
+function CustomerGen.staff(pack: Pack, rng: Random, taken: { [string]: boolean }, avoidLabels: { [string]: boolean }?): StaffProfile
+	local spec = pack.staff
+	local name = pick(rng, spec.names)
+	for _ = 1, 20 do
+		if not taken[name] then
+			break
+		end
+		name = pick(rng, spec.names)
+	end
+	local pool = {}
+	for _, p in spec.personalities do
+		if not (avoidLabels and avoidLabels[p.label]) then
+			table.insert(pool, p)
+		end
+	end
+	if #pool == 0 then
+		pool = spec.personalities
+	end
+	nextId += 1
 	return {
-		id = profile.id,
-		name = profile.name,
-		ageGroup = profile.ageGroup,
-		situation = profile.situation,
+		id = nextId,
+		name = name,
+		look = pick(rng, spec.looks),
+		personality = pickWeighted(rng, pool, function(p: Personality)
+			return p.weight
+		end),
+		voice = rollVoice(rng, "adult"),
 	}
 end
 

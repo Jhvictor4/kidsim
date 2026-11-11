@@ -1,50 +1,60 @@
 --!strict
 -- Multiplayer round flow, shared by everyone in the server:
---   lobby -> countdown -> running (timed) -> results -> lobby
--- Each player owns one counter lane. A LaneEngine runs per player per
--- round; the leaderboard compares everyone's score live and at the end.
--- Players who join mid-round get a lane but wait for the next round.
+--   lobby -> countdown -> running (timed) -> closing -> results -> lobby
+-- Each player owns one shop. A ShopEngine runs per owner per round; the
+-- leaderboard compares owners live and at the end. Players who join
+-- mid-round get a shop but wait for the next round.
 
 local Players = game:GetService("Players")
 
 local Types = require(game.ReplicatedStorage.Shared.Types)
 local Remotes = require(game.ReplicatedStorage.Shared.Remotes)
-local LaneEngine = require(script.Parent.LaneEngine)
+local ShopEngine = require(script.Parent.ShopEngine)
 local AgentRuntime = require(script.Parent.AgentRuntime)
 local Config = require(script.Parent.Config)
 
 type Pack = Types.Pack
 type LeaderboardRow = Types.LeaderboardRow
-type LaneHooks = LaneEngine.LaneHooks
-type LaneEngineInstance = LaneEngine.LaneEngineInstance
+type ShopHooks = ShopEngine.ShopHooks
+type ShopEngineInstance = ShopEngine.ShopEngineInstance
 
-type World = { lanes: { LaneHooks }, setOpen: (open: boolean) -> () }
+type World = { shops: { ShopHooks } }
 
 local RoundManager = {}
 
 function RoundManager.start(pack: Pack, world: World)
 	local phase = "lobby"
-	local laneOwner: { [number]: Player } = {}
-	local laneOf: { [Player]: number } = {}
-	local engines: { [Player]: LaneEngineInstance } = {}
+	local shopOwner: { [number]: Player } = {}
+	local shopOf: { [Player]: number } = {}
+	local engines: { [Player]: ShopEngineInstance } = {}
 	local endsAt = 0
 	local lastResults: { [string]: any }? = nil
 
-	-- ---------- lanes ----------
-
-	local function resetSign(index: number)
-		local owner = laneOwner[index]
-		world.lanes[index].setSign(if owner then owner.DisplayName else "Counter " .. index, if owner then "ready" else "open")
+	-- what the client needs to draw the rule chips
+	local policyDefs = {}
+	for _, p in pack.policies do
+		local labels = {}
+		for _, option in p.options do
+			table.insert(labels, option.label)
+		end
+		table.insert(policyDefs, { key = p.key, title = p.title, options = labels, default = p.default })
 	end
 
-	local function assignLane(player: Player): number?
-		if laneOf[player] then
-			return laneOf[player]
+	-- ---------- shops ----------
+
+	local function resetSign(index: number)
+		local owner = shopOwner[index]
+		world.shops[index].setSign(if owner then owner.DisplayName .. "'s cafe" else "Shop " .. index, if owner then "ready" else "for rent")
+	end
+
+	local function assignShop(player: Player): number?
+		if shopOf[player] then
+			return shopOf[player]
 		end
-		for index = 1, #world.lanes do
-			if laneOwner[index] == nil then
-				laneOwner[index] = player
-				laneOf[player] = index
+		for index = 1, #world.shops do
+			if shopOwner[index] == nil then
+				shopOwner[index] = player
+				shopOf[player] = index
 				resetSign(index)
 				return index
 			end
@@ -52,49 +62,57 @@ function RoundManager.start(pack: Pack, world: World)
 		return nil
 	end
 
-	local function releaseLane(player: Player)
-		local index = laneOf[player]
+	local function releaseShop(player: Player)
+		local index = shopOf[player]
 		if index then
-			laneOwner[index] = nil
-			laneOf[player] = nil
+			shopOwner[index] = nil
+			shopOf[player] = nil
 			resetSign(index)
 		end
 	end
 
-	local function placeCharacter(player: Player)
-		local index = laneOf[player]
+	-- put the owner on their throne
+	local function seatOwner(player: Player)
+		local index = shopOf[player]
 		local character = player.Character
 		if not index or not character then
 			return
 		end
-		local root = character:WaitForChild("HumanoidRootPart", 5)
-		if root then
-			character:PivotTo(world.lanes[index].spawnCFrame)
+		local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 5)
+		local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
+		if not humanoid or not root then
+			return
 		end
+		local throne = world.shops[index].throne
+		character:PivotTo(throne.CFrame + Vector3.new(0, 3, 0))
+		task.wait(0.2)
+		pcall(function()
+			throne:Sit(humanoid :: Humanoid)
+		end)
 	end
 
 	-- ---------- broadcasting ----------
 
 	local function leaderboard(): { LeaderboardRow }
 		local rows: { LeaderboardRow } = {}
-		for index, player in laneOwner do
+		for index, player in shopOwner do
 			local engine = engines[player]
-			local stats = if engine then engine:stats() else { revenue = 0, avgStars = 0, served = 0, score = 0, walletSeen = 0 }
+			local stats = if engine then engine:stats() else nil
 			table.insert(rows, {
 				userId = player.UserId,
 				name = player.DisplayName,
-				lane = index,
-				revenue = stats.revenue,
-				avgStars = stats.avgStars,
-				served = stats.served,
-				score = stats.score,
+				shop = index,
+				revenue = if stats then stats.revenue else 0,
+				avgStars = if stats then stats.avgStars else 0,
+				served = if stats then stats.served else 0,
+				score = if stats then stats.score else 0,
 			})
 		end
 		table.sort(rows, function(a, b)
 			if a.score ~= b.score then
 				return a.score > b.score
 			end
-			return a.lane < b.lane
+			return a.shop < b.shop
 		end)
 		return rows
 	end
@@ -109,9 +127,10 @@ function RoundManager.start(pack: Pack, world: World)
 			thesis = pack.thesis,
 			briefing = pack.briefing,
 			menu = pack.menu,
+			policies = policyDefs,
 			roundSeconds = Config.ROUND_SECONDS,
-			lane = laneOf[player],
-			lanesFull = laneOf[player] == nil,
+			shop = shopOf[player],
+			shopsFull = shopOf[player] == nil,
 		}
 	end
 
@@ -119,9 +138,8 @@ function RoundManager.start(pack: Pack, world: World)
 		if phase == "lobby" then
 			Remotes.get("Phase"):FireClient(player, "lobby", lobbyPayload(player))
 		elseif phase == "countdown" or phase == "running" or phase == "closing" then
-			local index = laneOf[player]
-			if engines[player] and index then
-				Remotes.get("Phase"):FireClient(player, phase, { lane = index, camera = world.lanes[index].cameraCFrame })
+			if engines[player] then
+				Remotes.get("Phase"):FireClient(player, phase, { shop = shopOf[player], policies = policyDefs })
 			else
 				Remotes.get("Phase"):FireClient(player, "waiting", lobbyPayload(player))
 			end
@@ -144,7 +162,6 @@ function RoundManager.start(pack: Pack, world: World)
 
 	local function finishRound()
 		phase = "closing"
-		world.setOpen(false)
 		for _, engine in engines do
 			engine:stop()
 		end
@@ -156,38 +173,32 @@ function RoundManager.start(pack: Pack, world: World)
 			rankOf[row.userId] = rank
 		end
 
-		-- evaluate every lane in parallel
 		local pending = 0
 		for player, engine in engines do
 			pending += 1
 			task.spawn(function()
-				local stats = engine:stats()
-				local evaluation = AgentRuntime.evaluate(pack, engine.records, {
-					revenue = stats.revenue,
-					averageStars = stats.avgStars,
-					customersServed = stats.served,
-					moneyInTheirWallets = stats.walletSeen,
-					score = stats.score,
-					rank = rankOf[player.UserId],
-					players = #finalBoard,
-				})
+				local record = engine:record()
+				record.rank = rankOf[player.UserId]
+				record.players = #finalBoard
+				local evaluation = AgentRuntime.evaluate(pack, record)
 				if player.Parent == Players then
 					Remotes.get("Debrief"):FireClient(player, {
 						leaderboard = finalBoard,
 						rank = rankOf[player.UserId],
-						stats = stats,
-						records = engine.records,
-						menu = pack.menu,
+						stats = engine:stats(),
+						staff = record.staff,
+						rules = record.finalRules,
 						evaluation = evaluation,
 						thesis = pack.thesis,
 						title = pack.title,
 					})
 				end
+				engine:cleanup()
 				pending -= 1
 			end)
 		end
 		local waitedSince = os.clock()
-		while pending > 0 and os.clock() - waitedSince < 40 do
+		while pending > 0 and os.clock() - waitedSince < 45 do
 			task.wait(0.2)
 		end
 
@@ -206,10 +217,13 @@ function RoundManager.start(pack: Pack, world: World)
 		end
 		phase = "countdown"
 		engines = {}
-		endsAt = os.clock() + Config.COUNTDOWN_SECONDS + Config.ROUND_SECONDS
-		for index, player in laneOwner do
-			placeCharacter(player)
-			engines[player] = LaneEngine.new(pack, player, world.lanes[index], endsAt, broadcastLeaderboard)
+		local startedAt = os.clock() + Config.COUNTDOWN_SECONDS
+		endsAt = startedAt + Config.ROUND_SECONDS
+		for index, player in shopOwner do
+			task.spawn(seatOwner, player)
+			local engine = ShopEngine.new(pack, player, world.shops[index], startedAt, endsAt, broadcastLeaderboard)
+			engines[player] = engine
+			engine:hireFirstTeam() -- staff walk in during the countdown
 		end
 		sendPhaseAll()
 		broadcastLeaderboard()
@@ -219,7 +233,6 @@ function RoundManager.start(pack: Pack, world: World)
 		end
 
 		phase = "running"
-		world.setOpen(true)
 		sendPhaseAll()
 		for _, engine in engines do
 			task.spawn(function()
@@ -241,7 +254,7 @@ function RoundManager.start(pack: Pack, world: World)
 		phase = "lobby"
 		engines = {}
 		lastResults = nil
-		for index in laneOwner do
+		for index in shopOwner do
 			resetSign(index)
 		end
 		sendPhaseAll()
@@ -251,15 +264,14 @@ function RoundManager.start(pack: Pack, world: World)
 	-- ---------- players ----------
 
 	local function onPlayerAdded(player: Player)
-		assignLane(player)
+		assignShop(player)
 		player.CharacterAdded:Connect(function()
-			task.wait(0.2)
-			placeCharacter(player)
+			task.wait(0.3)
+			seatOwner(player)
 		end)
 		if player.Character then
-			task.spawn(placeCharacter, player)
+			task.spawn(seatOwner, player)
 		end
-		-- give the client a moment to hook its remotes
 		task.delay(1, function()
 			if player.Parent == Players then
 				sendPhaseTo(player)
@@ -278,13 +290,14 @@ function RoundManager.start(pack: Pack, world: World)
 		local engine = engines[player]
 		if engine then
 			engine:stop()
+			engine:cleanup()
 		end
-		releaseLane(player)
+		releaseShop(player)
 		broadcastLeaderboard()
 	end)
 
 	Remotes.get("StartRound").OnServerEvent:Connect(function(player)
-		if phase == "lobby" and laneOf[player] then
+		if phase == "lobby" and shopOf[player] then
 			task.spawn(startRound)
 		end
 	end)

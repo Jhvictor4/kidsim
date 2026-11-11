@@ -1,6 +1,6 @@
 --!strict
--- Boot: create remotes, build the world (one counter lane per possible
--- player), and hand everything to the RoundManager. Swapping ACTIVE_PACK to
+-- Boot: create remotes, build the world (one shop per possible player),
+-- and hand everything to the RoundManager. Swapping ACTIVE_PACK to
 -- a different module is the whole "new scenario" story — the engine does
 -- not change.
 
@@ -13,7 +13,7 @@ local Config = require(script.Parent.Config)
 local ACTIVE_PACK = require(script.Parent.Packs.CafeShift)
 
 Remotes.init()
-local world = WorldBuilder.build(ACTIVE_PACK, Config.MAX_LANES)
+local world = WorldBuilder.build(ACTIVE_PACK, Config.MAX_SHOPS)
 
 print("[KidSim] Pack loaded: " .. ACTIVE_PACK.title .. " (" .. ACTIVE_PACK.id .. ")")
 print("[KidSim] LLM configured: " .. tostring(LlmClient.isConfigured()))

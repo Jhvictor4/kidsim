@@ -2,29 +2,28 @@
 -- Cafe Shift — ONE scenario pack. The engine never reads cafe concepts;
 -- everything cafe lives here. Court, negotiation, accounting = new packs.
 --
--- No scripted incidents: every customer is generated from the ranges
--- below and played by an LLM agent. The child's job is to read the
--- customer, suggest what actually fits, and earn as much of their wallet
--- as they can WITHOUT making them unhappy (stars are part of the score).
+-- The child is the OWNER. Three staff agents (each with a hidden
+-- personality) serve random customer agents. The owner sets the rules,
+-- answers staff who walk over with questions, and praises, warns or fires
+-- staff based on what they see. Score = money + happy customers.
 
 local Types = require(game.ReplicatedStorage.Shared.Types)
 
 type Pack = Types.Pack
 
 local AGE_GUARDRAILS = table.concat({
-	"The shopkeeper is a child around 10-13 years old.",
+	"Everything happens in a cafe owned by a child around 10-13 years old.",
 	"Keep every line to 1-2 short sentences of spoken dialogue: no narration, no stage directions, no emoji spam.",
-	"Stay strictly age-appropriate: no romance, no violence, no scary content, no adult topics.",
+	"Stay strictly age-appropriate: no romance, no violence, no scary content, no adult topics, no swearing.",
 	"Never mention being an AI, a simulation, prompts, JSON, or game mechanics in what you say.",
-	"If the shopkeeper is rude, react like a normal person would (mildly hurt or annoyed), never crude.",
 }, " ")
 
 local pack: Pack = {
 	id = "cafe_shift",
 	title = "Cafe Shift",
 	thesis = "Practice real skills in Roblox. Take them into the real world.",
-	briefing = "You each run a counter at Sunny Side Cafe. Customers walk up with real wallets and real moods. Talk to them, figure out what they actually want, and make the sale. Your score is the money you earn PLUS how happy they leave — pushy sales cost you, and happy customers tell their friends.",
-	skillTags = { "asking_questions", "reading_people", "upselling", "honest_pricing", "negotiation", "customer_service" },
+	briefing = "You OWN Sunny Side Cafe. Three staff run your counters — but each one has a hidden personality. Set the house rules, answer staff who come to your throne with questions, and keep an eye on who breaks the rules. Praise good work, warn, or fire. Your score is money earned plus happy customers.",
+	skillTags = { "setting_clear_rules", "delegating", "judging_from_evidence", "giving_feedback", "fair_decisions", "responding_to_your_team" },
 
 	menu = {
 		{ key = "coffee", label = "Coffee", price = 4 },
@@ -36,12 +35,12 @@ local pack: Pack = {
 	},
 
 	initialStock = {
-		coffee = 12,
-		hotchoc = 10,
-		lemonade = 10,
-		sandwich = 6,
-		croissant = 8,
-		cookie = 15,
+		coffee = 20,
+		hotchoc = 16,
+		lemonade = 16,
+		sandwich = 10,
+		croissant = 14,
+		cookie = 24,
 	},
 
 	customers = {
@@ -64,11 +63,9 @@ local pack: Pack = {
 			"picking up snacks for a team meeting",
 			"just finished soccer practice and is starving",
 			"celebrating a friend's birthday",
-			"feeling a bit down today",
 			"a tourist who has never been here before",
-			"waiting for a friend who is running late",
 			"cold from the rain outside",
-			"looking for a gift for a neighbour",
+			"a regular who always asks for a deal",
 		},
 		tastes = {
 			"sweet things, especially anything with chocolate",
@@ -77,48 +74,108 @@ local pack: Pack = {
 			"something filling, they skipped breakfast",
 			"cold drinks",
 			"trying something new they've never had",
-			"warm drinks",
 			"small treats to share with others",
 		},
 		sensitivities = {
 			{
-				label = "frugal",
-				prompt = "You count every dollar. You like a fair deal and get annoyed by pushy upselling, but a suggestion that genuinely fits your need can still win you over.",
+				label = "bargain-hunter",
+				prompt = "You always ask for a discount first (try for 30-50% off) and push a bit. You still pay full price if the staff member politely holds firm and the offer fits your need.",
 			},
 			{
 				label = "normal",
-				prompt = "You spend normally. A friendly, relevant suggestion can talk you into one more thing; pushiness puts you off.",
+				prompt = "You spend normally. A friendly, relevant suggestion can talk you into one more thing; pushiness or rudeness puts you off.",
 			},
 			{
 				label = "generous",
-				prompt = "You happily spend on things that feel worth it and enjoy being looked after. You will add items if the shopkeeper makes them sound good and fitting.",
+				prompt = "You happily spend on things that feel worth it and enjoy being looked after.",
 			},
 		},
-		patienceMin = 3,
-		patienceMax = 6,
+		patienceMin = 2,
+		patienceMax = 4,
+	},
+
+	staff = {
+		names = { "Mina", "Jake", "Sora", "Theo", "Ivy", "Max", "Ruby", "Kai", "Lena", "Finn" },
+		looks = { "white", "brown", "navy", "olive" },
+		personalities = {
+			{
+				label = "Star",
+				weight = 2,
+				prompt = "You are warm and professional. You ask customers what they need, suggest things that fit, follow the owner's rules exactly, and ask the owner when a request is outside the rules.",
+			},
+			{
+				label = "Pushover",
+				weight = 2,
+				prompt = "You hate saying no. When a customer asks for a discount you usually give it, often bigger than the owner allows, and you rarely bother asking the owner first.",
+			},
+			{
+				label = "Pushy seller",
+				weight = 2,
+				prompt = "You care only about selling more. You keep pushing extra items even after the customer says no, and you exaggerate how good things are.",
+			},
+			{
+				label = "Grumpy",
+				weight = 1,
+				prompt = "You are impatient and short with customers, especially ones who can't decide or ask for deals. You follow the price rules but you sound annoyed.",
+			},
+			{
+				label = "Worrier",
+				weight = 1,
+				prompt = "You are kind but unsure of yourself. You ask the owner about almost every small decision, even ones the rules already cover.",
+			},
+		},
+	},
+
+	policies = {
+		{
+			key = "discounts",
+			title = "Discounts",
+			default = 2,
+			options = {
+				{ label = "No discounts", prompt = "Never give a discount; always charge menu price.", maxDiscountPct = 0 },
+				{ label = "Up to 10% off", prompt = "You may give at most 10% off, only if it saves the sale.", maxDiscountPct = 10 },
+				{ label = "Staff decide", prompt = "You may decide discounts yourself; keep the cafe making money." },
+			},
+		},
+		{
+			key = "selling",
+			title = "Selling",
+			default = 2,
+			options = {
+				{ label = "Just take orders", prompt = "Only sell what the customer asks for. Don't suggest extras." },
+				{ label = "Suggest one extra", prompt = "Ask what the customer needs and suggest at most one extra item that fits. Accept a no." },
+				{ label = "Sell as much as you can", prompt = "Try hard to sell as many items as possible to every customer." },
+			},
+		},
+		{
+			key = "askMe",
+			title = "Ask me first",
+			default = 2,
+			options = {
+				{ label = "Never — decide yourself", prompt = "Don't come to the owner; make every decision yourself." },
+				{ label = "Big discounts", prompt = "Ask the owner before giving more than 10% off.", askAboveDiscountPct = 10 },
+				{ label = "Any discount or freebie", prompt = "Ask the owner before giving ANY discount or anything free.", askAboveDiscountPct = 0 },
+			},
+		},
 	},
 
 	cast = {
-		customerBase = "You are a customer at Sunny Side Cafe, a small cafe run by a kid. " .. AGE_GUARDRAILS,
-		coach = table.concat({
-			"You are a friendly sales coach whispering to a kid running a cafe counter.",
-			"Give EXACTLY ONE hint, maximum 2 short sentences, in plain words a 10-year-old knows.",
-			"Help them read the customer and sell well AND kindly: ask a question, connect the menu to what the customer needs, be honest about prices.",
-			"You only know what the kid can see (the customer's look and situation and the conversation so far), not their wallet. Never take the action for them.",
-		}, " "),
+		customerBase = "You are a customer at Sunny Side Cafe, talking to a staff member at the counter. " .. AGE_GUARDRAILS,
+		staffBase = "You work the counter at Sunny Side Cafe. Your boss is the cafe owner, a kid, who sits on a throne in the shop. " .. AGE_GUARDRAILS,
 		evaluator = table.concat({
 			"You are a kind but honest skills evaluator for a children's life-skills simulator.",
-			"The child just ran a cafe counter for one timed round. You receive every customer they served: the customer's hidden profile (wallet, taste, price attitude), what the child said, what was bought, what was paid, and the stars the customer gave.",
-			"Good selling means: asking questions to discover needs, suggesting things that fit, being honest about prices, and leaving people happy. Squeezing money out of an unhappy customer is NOT good selling.",
-			"Judge only from the record. Cite real customers, real lines and real numbers as evidence.",
-			"Plain words a 10-year-old understands. Encouraging, specific, never empty praise.",
+			"The child just played the OWNER of a cafe for one timed round. Staff agents with hidden personalities served customers; the child set house rules, answered staff questions, and praised, warned or fired staff.",
+			"You receive the rules the child chose, every owner action with its time, every sale (staff, customer, discount, stars, rule breaks), and each staff member's hidden personality.",
+			"Good owning means: clear rules, answering the team quickly, judging staff from evidence (rule breaks, unhappy customers), warning before firing when fair, and keeping customers happy.",
+			"Judge only from the record. Cite real staff names, real moments and real numbers. Plain words a 10-year-old understands. Encouraging, specific, never empty praise.",
 		}, " "),
 	},
 
 	debriefTemplate = table.concat({
-		"Name at most 3 skills in plain English, each with evidence from a specific customer.",
-		"realWorldTransfer must connect to the child's own life (selling at a school fair, convincing a parent, trading with a friend, a lemonade stand), not just jobs.",
-		"Only mention things that actually happened in the record. The next drill must be doable in one more round.",
+		"Name at most 3 skills in plain English (e.g. setting clear rules, judging people by what they do, giving fair feedback), each with evidence from a real moment.",
+		"In wentWell/wentWrong, say for each staff member whether the child read them correctly (their hidden personality is in the record).",
+		"realWorldTransfer must connect to the child's own life (leading a group project, team captain, organising a class event, babysitting), not just jobs.",
+		"Only mention things that actually happened. The next drill must be doable in one more round.",
 	}, " "),
 }
 
